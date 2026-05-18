@@ -178,7 +178,8 @@ class NestedAgentSessionComponent extends Container {
 	private details?: SpawnResultDetails;
 	private nestTheme?: Theme;
 	private ownedToolCallId?: string;
-	private liveChildSessions?: Map<string, AgentSession>;
+	private state?: AgenticodingState;
+	private attachedChildSessionEpoch?: number;
 	private liveOutcome: SpawnOutcome = "running";
 	// States: "⏳ initializing…" → "💭 thinking…" → "[tool] …/preview" or live text → terminal outcome
 	private lastAction = "";
@@ -226,11 +227,16 @@ class NestedAgentSessionComponent extends Container {
 		if (changed) this.clearRenderCache();
 	}
 
-	attachSession(toolCallId: string, session: AgentSession, liveChildSessions?: Map<string, AgentSession>): void {
+	attachSession(
+		toolCallId: string,
+		session: AgentSession,
+		state: AgenticodingState,
+	): void {
 		if (
 			this.session === session
 			&& this.ownedToolCallId === toolCallId
-			&& this.liveChildSessions === liveChildSessions
+			&& this.state === state
+			&& this.attachedChildSessionEpoch === state.childSessionEpoch
 		) {
 			return;
 		}
@@ -239,7 +245,8 @@ class NestedAgentSessionComponent extends Container {
 		this.unsubscribe = undefined;
 		this.session = session;
 		this.ownedToolCallId = toolCallId;
-		this.liveChildSessions = liveChildSessions;
+		this.state = state;
+		this.attachedChildSessionEpoch = state.childSessionEpoch;
 		this.liveOutcome = this.details?.outcome ?? "running";
 		this.toolNames.clear();
 		this.toolComponentFailures.clear();
@@ -270,18 +277,34 @@ class NestedAgentSessionComponent extends Container {
 	}
 
 	/**
-	 * Returns true when the session held by this component has been replaced
-	 * in the liveChildSessions map (e.g., after a resetState). When stale, the
-	 * component silently drops all events to avoid operating on a different
-	 * session than what it was attached to.
+	 * Returns the ownership invalidation reason for the attached session.
+	 *
+	 * Three stale paths:
+	 *   1. resetState() bumped childSessionEpoch after attach, invalidating all
+	 *      prior child sessions even if their objects still exist.
+	 *   2. state.liveChildSessions no longer contains this toolCallId because the
+	 *      child completed and cleared its live ownership.
+	 *   3. state.liveChildSessions now points this toolCallId at a different
+	 *      session, meaning a newer child claimed the slot.
 	 */
+	private getStaleSessionReason(): "epoch" | "completion" | "replacement" | undefined {
+		if (!this.session || !this.ownedToolCallId) {
+			return undefined;
+		}
+		if (this.state && this.attachedChildSessionEpoch !== this.state.childSessionEpoch) {
+			return "epoch";
+		}
+		const liveChildSessions = this.state?.liveChildSessions;
+		if (!liveChildSessions?.has(this.ownedToolCallId)) {
+			return "completion";
+		}
+		return liveChildSessions.get(this.ownedToolCallId) !== this.session
+			? "replacement"
+			: undefined;
+	}
+
 	private isStaleSession(): boolean {
-		return !!(
-			this.session
-			&& this.ownedToolCallId
-			&& this.liveChildSessions
-			&& this.liveChildSessions.get(this.ownedToolCallId) !== this.session
-		);
+		return this.getStaleSessionReason() !== undefined;
 	}
 
 	dispose(): void {
@@ -291,7 +314,7 @@ class NestedAgentSessionComponent extends Container {
 		// dispose, the nulled-out fields prevent double-abort.
 		const session = this.session;
 		const ownedToolCallId = this.ownedToolCallId;
-		const liveChildSessions = this.liveChildSessions;
+		const liveChildSessions = this.state?.liveChildSessions;
 		this.clearRenderCache();
 		this.details = undefined;
 		this.nestTheme = undefined;
@@ -300,7 +323,8 @@ class NestedAgentSessionComponent extends Container {
 		this.toolComponentFailures.clear();
 		this.session = undefined;
 		this.ownedToolCallId = undefined;
-		this.liveChildSessions = undefined;
+		this.state = undefined;
+		this.attachedChildSessionEpoch = undefined;
 		if (session && ownedToolCallId && liveChildSessions?.get(ownedToolCallId) === session) {
 			session.abort().catch(e => console.error("[spawn] abort failed:", ownedToolCallId, e));
 			liveChildSessions.delete(ownedToolCallId);
@@ -776,10 +800,7 @@ function renderSpawnResult(
 	}
 	const child = state.childSessions.get(context.toolCallId);
 	if (child) {
-		const liveChildSessions = state.liveChildSessions.get(context.toolCallId) === child
-			? state.liveChildSessions
-			: undefined;
-		component.attachSession(context.toolCallId, child, liveChildSessions);
+		component.attachSession(context.toolCallId, child, state);
 		state.childSessions.delete(context.toolCallId);
 		return component;
 	}

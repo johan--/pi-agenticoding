@@ -335,8 +335,8 @@ export async function executeSpawn(
 		await abortAndInvalidate();
 	}
 
-	// liveChildSessions must be set first — renderSpawnResult checks it to decide
-	// whether to pass the live registry to attachSession for stale detection.
+	// liveChildSessions must be set before childSessions so the renderer can
+	// attach with a fully-published live ownership record.
 	state.liveChildSessions.set(toolCallId, session);
 	state.childSessions.set(toolCallId, session);
 

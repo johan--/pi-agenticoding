@@ -37,10 +37,11 @@ export interface AgenticodingState {
 	/**
 	 * All live child agent sessions keyed by toolCallId, including claimed ones.
 	 * Reset/teardown aborts this registry so claimed children cannot outlive /new or UI disposal.
+	 * Completed children remove themselves from this registry before returning.
 	 *
 	 * INVARIANT: This Map is never replaced — only cleared via .clear().
-	 * NestedAgentSessionComponent holds a direct reference and depends on it
-	 * staying valid. If you change this, update attachSession in spawn/renderer.ts.
+	 * Spawn renderer ownership checks read this registry after attach, so its
+	 * identity must stay stable across resets, completion cleanup, and disposal.
 	 */
 	liveChildSessions: Map<string, AgentSession>;
 
@@ -65,9 +66,9 @@ export function createState(): AgenticodingState {
 		liveChildSessions,
 		childSessionEpoch: 0,
 	};
-	// Prevent replacement — NestedAgentSessionComponent holds direct references
-	// to both maps and depends on reference stability. Only .clear() and .delete()
-	// are valid — assigning a new Map would silently break session lifecycle.
+	// Prevent replacement — spawn lifecycle code and renderer ownership checks
+	// depend on stable map identity. Only .clear() and .delete() are valid —
+	// assigning a new Map would silently break child-session invalidation.
 	Object.defineProperty(state, 'childSessions', {
 		get: () => childSessions,
 		set: () => { throw new Error('childSessions cannot be replaced — use .clear() instead'); },
