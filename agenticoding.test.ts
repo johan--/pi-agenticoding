@@ -1,6 +1,7 @@
-import test from "node:test";
+import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import type { Theme } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
 import { registerHandoffCommand } from "./handoff/command.js";
 import { registerHandoffTool } from "./handoff/tool.js";
 import { registerHandoffCompaction } from "./handoff/compact.js";
@@ -12,10 +13,19 @@ import {
 	executeSpawn,
 	registerSpawnTool,
 } from "./spawn/index.js";
-import { renderSpawnResult } from "./spawn/renderer.js";
+import { renderSpawnResult, flushSpawnFrameScheduler, resetSpawnFrameScheduler } from "./spawn/renderer.js";
 import { registerLedgerRehydration } from "./ledger/rehydration.js";
+import { saveLedgerEntry, resetLedgerWriteLock } from "./ledger/store.js";
 import { createLedgerToolDefinitions } from "./ledger/tools.js";
 import registerAgenticoding from "./index.js";
+import { STATUS_KEY_HANDOFF, WIDGET_KEY_WARNING, updateIndicators } from "./tui.js";
+
+// Safety net: reset module-level mutable state after all tests.
+// Individual tests should also call reset*() at the start for explicit isolation.
+after(() => {
+	resetLedgerWriteLock();
+	resetSpawnFrameScheduler();
+});
 
 type Handler = (args: any, ctx: any) => any;
 
@@ -49,8 +59,10 @@ function stripAnsi(text: string): string {
 	return text.replace(/\u001b\[[0-9;]*m/g, "").replace(/\u001b\][^\u0007]*\u0007/g, "");
 }
 
-async function flushMicrotasks(): Promise<void> {
-	await new Promise<void>(resolve => queueMicrotask(resolve));
+function createDeferred() {
+	let resolve!: () => void;
+	const promise = new Promise<void>((r) => { resolve = r; });
+	return { promise, resolve };
 }
 
 function createChildSpawnTool(state: any): any {
@@ -125,6 +137,119 @@ class MockPi {
 		this.appendedEntries.push({ customType, data });
 	}
 }
+
+// ── TUI indicator tests ───────────────────────────────────────────────
+
+function makeTUICtx(
+	overrides: Partial<{
+		percent: number | null;
+		hasUI: boolean;
+		record: { statuses: Map<string, string | undefined>; widgets: Map<string, string[] | undefined> };
+	}> = {},
+): any {
+	const record = overrides.record ?? { statuses: new Map(), widgets: new Map() };
+	const hasUI = overrides.hasUI ?? true;
+	const percent = overrides.percent !== undefined ? overrides.percent : null;
+	return {
+		hasUI,
+		ui: {
+			theme: {
+				fg: (name: string, text: string) => `[${name}:${text}]`,
+			},
+			setStatus: (key: string, status: string | undefined) => { record.statuses.set(key, status); },
+			setWidget: (key: string, content: string[] | undefined) => { record.widgets.set(key, content); },
+		},
+		getContextUsage: () => (percent !== null ? { percent } : null),
+	};
+}
+
+test("updateIndicators sets context usage status with correct color tone", () => {
+	const state = createState();
+	const record = { statuses: new Map<string, string | undefined>(), widgets: new Map<string, string[] | undefined>() };
+	const ctx = makeTUICtx({ percent: 42, record });
+
+	updateIndicators(ctx, state);
+	const s = record.statuses.get("agenticoding-ctx");
+	assert.ok(s?.includes("[accent:42%]"), "42% should use accent tone");
+	assert.equal(record.widgets.get("agenticoding-warning"), undefined, "42% is below 70 — no warning widget");
+});
+
+test("updateIndicators uses error tone at 70%+ context", () => {
+	const state = createState();
+	const record = { statuses: new Map<string, string | undefined>(), widgets: new Map<string, string[] | undefined>() };
+	const ctx = makeTUICtx({ percent: 85, record });
+
+	updateIndicators(ctx, state);
+	const s = record.statuses.get("agenticoding-ctx");
+	assert.ok(s?.includes("[error:85%]"), "85% should use error tone");
+	const w = record.widgets.get("agenticoding-warning");
+	assert.ok(w?.[0]?.includes("85%"), "warning widget shown at 85%");
+});
+
+test("updateIndicators uses warning tone at 50-69% context", () => {
+	const state = createState();
+	const record = { statuses: new Map<string, string | undefined>(), widgets: new Map<string, string[] | undefined>() };
+	const ctx = makeTUICtx({ percent: 55, record });
+
+	updateIndicators(ctx, state);
+	const s = record.statuses.get("agenticoding-ctx");
+	assert.ok(s?.includes("[warning:55%]"), "55% should use warning tone");
+});
+
+test("updateIndicators uses accent tone at 30-49% context", () => {
+	const state = createState();
+	const record = { statuses: new Map<string, string | undefined>(), widgets: new Map<string, string[] | undefined>() };
+	const ctx = makeTUICtx({ percent: 30, record });
+
+	updateIndicators(ctx, state);
+	const s = record.statuses.get("agenticoding-ctx");
+	assert.ok(s?.includes("[accent:30%]"), "30% should use accent tone");
+});
+
+test("updateIndicators handles null context usage", () => {
+	const state = createState();
+	const record = { statuses: new Map<string, string | undefined>(), widgets: new Map<string, string[] | undefined>() };
+	const ctx = makeTUICtx({ percent: null, record });
+
+	updateIndicators(ctx, state);
+	const s = record.statuses.get("agenticoding-ctx");
+	assert.ok(s?.includes("--%"), "null usage shows --%");
+});
+
+test("updateIndicators no-ops when ctx.hasUI is false", () => {
+	const state = createState();
+	const record = { statuses: new Map<string, string | undefined>(), widgets: new Map<string, string[] | undefined>() };
+	const ctx = makeTUICtx({ hasUI: false, record });
+
+	updateIndicators(ctx, state);
+	assert.equal(record.statuses.size, 0, "no-op should not call any setStatus");
+	assert.equal(record.widgets.size, 0, "no-op should not call any setWidget");
+});
+
+test("updateIndicators shows ledger count in status", () => {
+	const state = createState();
+	state.ledger.set("entry-1", "first entry");
+	state.ledger.set("entry-2", "second entry");
+	const record = { statuses: new Map<string, string | undefined>(), widgets: new Map<string, string[] | undefined>() };
+	const ctx = makeTUICtx({ percent: null, record });
+
+	updateIndicators(ctx, state);
+	const s = record.statuses.get("agenticoding-ledger");
+	assert.ok(s?.includes("2"), "ledger count should be 2");
+});
+
+test("updateIndicators hides widget below 70% context", () => {
+	const state = createState();
+	const record = { statuses: new Map<string, string | undefined>(), widgets: new Map<string, string[] | undefined>() };
+	// Pre-set a widget to verify it gets cleared
+	record.widgets.set("agenticoding-warning", ["existing"]);
+	const ctx = makeTUICtx({ percent: 30, record });
+
+	updateIndicators(ctx, state);
+	assert.equal(record.widgets.get("agenticoding-warning"), undefined, "warning widget should be cleared below 70%");
+});
+
+// ── Handoff tests ─────────────────────────────────────────────────────
 
 test("/handoff sends the direction back through the LLM without opening the editor", async () => {
 	const pi = new MockPi();
@@ -222,6 +347,119 @@ test("handoff compaction replaces old context with the queued task", async () =>
 	assert.deepEqual(result.compaction.details, { handoff: true, task: "Goal: continue" });
 });
 
+test("/handoff sets the handoff status indicator", async () => {
+	const pi = new MockPi();
+	const state = createState();
+	registerHandoffCommand(pi as any, state);
+	const statuses = new Map<string, string | undefined>();
+
+	await pi.commands.get("handoff")!.handler("implement auth", {
+		hasUI: true,
+		isIdle: () => true,
+		ui: {
+			theme: { fg: (_name: string, text: string) => text },
+			notify: () => {},
+			setStatus: (key: string, value: string | undefined) => { statuses.set(key, value); },
+		},
+	});
+
+	assert.equal(statuses.get(STATUS_KEY_HANDOFF), "🤝 Handoff in progress");
+});
+
+test("handoff compaction clears the handoff status indicator", async () => {
+	const pi = new MockPi();
+	const state = createState();
+	state.pendingHandoff = { task: "Goal: continue", source: "tool" };
+	registerHandoffCompaction(pi as any, state);
+	const statuses = new Map<string, string | undefined>();
+	const [handler] = pi.handlers.get("session_before_compact")!;
+
+	await handler(
+		{ preparation: { tokensBefore: 1 }, branchEntries: [{ id: "leaf-1" }] },
+		{ hasUI: true, ui: { setStatus: (key: string, value: string | undefined) => { statuses.set(key, value); } } },
+	);
+
+	assert.equal(statuses.get(STATUS_KEY_HANDOFF), undefined);
+});
+
+test("handoff compaction error clears pending state and status", async () => {
+	const pi = new MockPi();
+	const state = createState();
+	state.pendingRequestedHandoff = { direction: "implement auth", enforcementAttempts: 0, toolCalled: false };
+	registerHandoffTool(pi as any, state);
+	let compactOptions: any;
+	const statuses = new Map<string, string | undefined>();
+
+	await pi.tools.get("handoff").execute(
+		"1",
+		{ task: "Goal: continue" },
+		undefined,
+		undefined,
+		{
+			hasUI: true,
+			ui: { setStatus: (key: string, value: string | undefined) => { statuses.set(key, value); } },
+			compact: (options: any) => { compactOptions = options; },
+		},
+	);
+	compactOptions.onError({});
+
+	assert.equal(state.pendingHandoff, null);
+	assert.equal(state.pendingRequestedHandoff?.toolCalled, false);
+	assert.equal(statuses.get(STATUS_KEY_HANDOFF), undefined);
+});
+
+test("turn_end fallback clears stale requested handoff status", async () => {
+	const pi = new MockPi();
+	registerAgenticoding(pi as any);
+	const statuses = new Map<string, string | undefined>();
+	await pi.commands.get("handoff")!.handler("implement auth", {
+		hasUI: true,
+		isIdle: () => true,
+		ui: {
+			theme: { fg: (_name: string, text: string) => text },
+			notify: () => {},
+			setStatus: (key: string, value: string | undefined) => { statuses.set(key, value); },
+		},
+	});
+
+	const [turnEnd] = pi.handlers.get("turn_end")!;
+	await turnEnd({}, {
+		hasUI: true,
+		ui: {
+			theme: { fg: (_name: string, text: string) => text },
+			setStatus: (key: string, value: string | undefined) => { statuses.set(key, value); },
+			setWidget: () => {},
+		},
+		getContextUsage: () => null,
+	});
+
+	assert.equal(statuses.get(STATUS_KEY_HANDOFF), undefined);
+});
+
+test("session_start new clears stale handoff status and warning widget", async () => {
+	const pi = new MockPi();
+	registerAgenticoding(pi as any);
+	const statuses = new Map<string, string | undefined>([[STATUS_KEY_HANDOFF, "stale"]]);
+	const widgets = new Map<string, string[] | undefined>([[WIDGET_KEY_WARNING, ["stale"]]]);
+	const sessionStartHandlers = pi.handlers.get("session_start")!;
+	const ctx = {
+		hasUI: true,
+		ui: {
+			theme: { fg: (_name: string, text: string) => text },
+			setStatus: (key: string, value: string | undefined) => { statuses.set(key, value); },
+			setWidget: (key: string, value: string[] | undefined) => { widgets.set(key, value); },
+		},
+		sessionManager: { getBranch: () => [] },
+		getContextUsage: () => null,
+	};
+	for (const sessionStart of sessionStartHandlers) {
+		await sessionStart({ reason: "new" }, ctx);
+	}
+
+	assert.equal(statuses.get(STATUS_KEY_HANDOFF), undefined);
+	assert.equal(widgets.get(WIDGET_KEY_WARNING), undefined);
+});
+
 test("watchdog records context usage without user notifications", async () => {
 	const pi = new MockPi();
 	const state = createState();
@@ -274,7 +512,10 @@ test("watchdog stays advisory when a requested handoff is not completed", async 
 		{},
 		{
 			hasUI: true,
-			ui: { notify: (message: string) => notifications.push(message) },
+			ui: {
+				notify: (message: string) => notifications.push(message),
+				setStatus: () => {},
+			},
 			getContextUsage: () => ({ percent: 20 }),
 		},
 	);
@@ -312,8 +553,8 @@ test("collapsed nested spawn render shows preview and stats", () => {
 	assert.ok(lines.some((l: string) => l.includes("one")));
 	assert.ok(lines.some((l: string) => l.includes("five")));
 	assert.ok(lines.some((l: string) => l.includes("... 2 more lines")));
-	assert.ok(lines.some((l: string) => l.includes("tokens: 12/34")));
-	assert.ok(lines.some((l: string) => l.includes("[truncated]")));
+	assert.ok(lines.some((l: string) => l.includes("tok 12/34")));
+	assert.ok(lines.some((l: string) => l.includes("trunc")));
 });
 
 test("collapsed nested spawn render keeps all text blocks from the last assistant message", () => {
@@ -377,8 +618,9 @@ test("expanded nested spawn header stays within width after indent", () => {
 	) as any;
 
 	const lines = component.render(24);
-	assert.ok(lines[0].startsWith("    "));
-	assert.ok(stripAnsi(lines[0]).length <= 24);
+	const headerLine = lines.find((line: string) => line.includes("model-name")) ?? "";
+	assert.ok(headerLine.startsWith("     "));
+	assert.ok(stripAnsi(headerLine).length <= 24);
 });
 
 test("nested spawn clears cached render when showImages changes", () => {
@@ -1464,7 +1706,7 @@ test("ledger tools add/get/list return stable contract details", async () => {
 	const [ledgerAdd, ledgerGet, ledgerList] = createLedgerToolDefinitions(pi as any, state);
 
 	const addResult = await ledgerAdd.execute("1", { name: "entry-a", content: "first line\nsecond line" }, undefined, undefined, {} as any);
-	assert.deepEqual(addResult.details, { entries: ["entry-a"] });
+	assert.deepEqual(addResult.details, { entries: ["entry-a"], preview: "first line" });
 	assert.equal(state.ledger.get("entry-a"), "first line\nsecond line");
 	assert.equal(pi.appendedEntries.length, 1);
 	assert.equal(pi.appendedEntries[0].customType, "ledger-entry");
@@ -1511,7 +1753,7 @@ test("child ledger_add succeeds while child session is fresh", async () => {
 	const [ledgerAdd] = createLedgerToolDefinitions(pi as any, state, { isStale: () => false });
 
 	const result = await ledgerAdd.execute("1", { name: "entry-a", content: "alpha" }, undefined, undefined, {} as any);
-	assert.deepEqual(result.details, { entries: ["entry-a"] });
+	assert.deepEqual(result.details, { entries: ["entry-a"], preview: "alpha" });
 	assert.equal(state.ledger.get("entry-a"), "alpha");
 	assert.equal(pi.appendedEntries.length, 1);
 });
@@ -1542,6 +1784,233 @@ test("ledger tools show empty-state placeholders", async () => {
 	const list = await ledgerList.execute("2", {}, undefined, undefined, {} as any);
 	assert.deepEqual(list.details, { entries: [] });
 	assert.match(list.content[0].text, /Entries:\n\(empty\)/);
+});
+
+test("ledger_add pushes onUpdate and refreshes UI indicators", async () => {
+	const pi = new MockPi();
+	const state = createState();
+	const [ledgerAdd] = createLedgerToolDefinitions(pi as any, state);
+	const record = { statuses: new Map<string, string | undefined>(), widgets: new Map<string, string[] | undefined>() };
+	let update: any;
+
+	const result = await ledgerAdd.execute(
+		"1",
+		{ name: "entry-a", content: "first line\nsecond line" },
+		undefined,
+		(payload: any) => { update = payload; },
+		makeTUICtx({ percent: 42, record }),
+	);
+
+	assert.equal(update.content[0].text, 'Saved "entry-a": first line');
+	assert.deepEqual(update.details, { entries: ["entry-a"], preview: "first line" });
+	assert.equal(record.statuses.get("agenticoding-ledger"), "📒 1");
+	assert.deepEqual(result.details, { entries: ["entry-a"], preview: "first line" });
+});
+
+test("ledger tool renderers expose stable call/result summaries", async () => {
+	const pi = new MockPi();
+	const state = createState();
+	const [ledgerAdd, ledgerGet, ledgerList] = createLedgerToolDefinitions(pi as any, state);
+
+	const addCall = ledgerAdd.renderCall!({ name: "entry-a", content: "first line\nsecond line" }, theme, {} as any) as Text;
+	assert.match(stripAnsi(addCall.render(120).join("\n")), /ledger_add "entry-a": first line/);
+
+	const addResult = ledgerAdd.renderResult!(
+		{ content: [{ type: "text", text: "" }], details: { entries: ["entry-a"], preview: "first line" } },
+		{ expanded: true },
+		theme,
+		{ args: { name: "entry-a", content: "first line\nsecond line" } } as any,
+	) as Text;
+	assert.match(stripAnsi(addResult.render(120).join("\n")), /Saved "entry-a": first line/);
+	assert.match(stripAnsi(addResult.render(120).join("\n")), /entry-a/);
+
+	const getResult = ledgerGet.renderResult!(
+		{ content: [{ type: "text", text: "ignored" }], details: { entries: ["entry-a"], found: true, body: "body" } },
+		{ expanded: true },
+		theme,
+		{ args: { name: "entry-a" } } as any,
+	) as Text;
+	assert.match(stripAnsi(getResult.render(120).join("\n")), /"entry-a"/);
+	assert.match(stripAnsi(getResult.render(120).join("\n")), /body/);
+
+	const getResultWithDelimiters = ledgerGet.renderResult!(
+		{ content: [{ type: "text", text: "ignored" }], details: { entries: ["entry-a"], found: true, body: "line 1\n---\nline 2" } },
+		{ expanded: true },
+		theme,
+		{ args: { name: "entry-a" } } as any,
+	) as Text;
+	assert.match(stripAnsi(getResultWithDelimiters.render(120).join("\n")), /line 1/);
+	assert.match(stripAnsi(getResultWithDelimiters.render(120).join("\n")), /line 2/);
+
+	const listResult = ledgerList.renderResult!(
+		{ content: [{ type: "text", text: "" }], details: { entries: ["entry-a", "entry-b"] } },
+		{ expanded: true },
+		theme,
+		{} as any,
+	) as Text;
+	assert.match(stripAnsi(listResult.render(120).join("\n")), /2 entries/);
+	assert.match(stripAnsi(listResult.render(120).join("\n")), /entry-a/);
+	assert.match(stripAnsi(listResult.render(120).join("\n")), /entry-b/);
+});
+
+test("/ledger exits cleanly when headless", async () => {
+	const pi = new MockPi();
+	registerAgenticoding(pi as any);
+
+	await assert.doesNotReject(() => pi.commands.get("ledger")!.handler("", { hasUI: false }));
+});
+
+test("/ledger empty overlay renders empty state and closes on input", async () => {
+	const pi = new MockPi();
+	registerAgenticoding(pi as any);
+	let overlay: any;
+	let doneCalls = 0;
+
+	await pi.commands.get("ledger")!.handler("", {
+		hasUI: true,
+		ui: {
+			theme,
+			custom: async (build: any) => {
+				overlay = build({ requestRender: () => {} }, theme, {}, () => { doneCalls++; });
+			},
+		},
+	});
+
+	const lines = stripAnsi(overlay.render(120).join("\n"));
+	assert.match(lines, /Ledger \(0 entries\)/);
+	assert.match(lines, /\(empty\) — use ledger_add to create entries/);
+	overlay.handleInput("x");
+	assert.equal(doneCalls, 1);
+});
+
+test("/ledger selection previews the chosen entry", async () => {
+	const pi = new MockPi();
+	registerAgenticoding(pi as any);
+	const notifications: string[] = [];
+	const ledgerAdd = pi.tools.get("ledger_add");
+	await ledgerAdd.execute("1", { name: "alpha", content: "body line\nsecond line" }, undefined, undefined, makeTUICtx());
+	let overlay: any;
+	let doneCalls = 0;
+
+	await pi.commands.get("ledger")!.handler("", {
+		hasUI: true,
+		ui: {
+			theme,
+			custom: async (build: any) => {
+				overlay = build({ requestRender: () => {} }, theme, {}, () => { doneCalls++; });
+			},
+			notify: (message: string) => { notifications.push(message); },
+		},
+	});
+
+	// First Enter selects the entry — shows body inline, done() not yet called
+	overlay.handleInput("\r");
+	assert.equal(doneCalls, 0, "body shown inline, overlay stays open");
+	const bodyLines = stripAnsi(overlay.render(120).join("\n"));
+	assert.match(bodyLines, /body line/);
+	assert.match(bodyLines, /alpha/);
+
+	// Second keypress closes the overlay
+	overlay.handleInput("\r");
+	assert.equal(doneCalls, 1);
+});
+
+test("/ledger overlay sorts entries consistently", async () => {
+	const pi = new MockPi();
+	registerAgenticoding(pi as any);
+	const ledgerAdd = pi.tools.get("ledger_add");
+	await ledgerAdd.execute("1", { name: "zeta", content: "last" }, undefined, undefined, makeTUICtx());
+	await ledgerAdd.execute("2", { name: "alpha", content: "first" }, undefined, undefined, makeTUICtx());
+	let overlay: any;
+
+	await pi.commands.get("ledger")!.handler("", {
+		hasUI: true,
+		ui: {
+			theme,
+			custom: async (build: any) => {
+				overlay = build({ requestRender: () => {} }, theme, {}, () => {});
+			},
+			notify: () => {},
+		},
+	});
+
+	const lines = stripAnsi(overlay.render(120).join("\n"));
+	assert.ok(lines.indexOf("alpha") < lines.indexOf("zeta"), lines);
+});
+
+test("saveLedgerEntry serializes concurrent writes and preserves completion order", async () => {
+	resetLedgerWriteLock();
+	const pi = new MockPi();
+	const state = createState();
+	const firstGate = createDeferred();
+	const order: string[] = [];
+
+	const first = saveLedgerEntry(pi as any, state, "entry-a", "first", async () => {
+		order.push("first:start");
+		await firstGate.promise;
+		order.push("first:end");
+	});
+	const second = saveLedgerEntry(pi as any, state, "entry-a", "second", async () => {
+		order.push("second:start");
+	});
+
+	await Promise.resolve();
+	assert.deepEqual(order, ["first:start"]);
+	firstGate.resolve();
+	await Promise.all([first, second]);
+
+	assert.deepEqual(order, ["first:start", "first:end", "second:start"]);
+	assert.equal(state.ledger.get("entry-a"), "second");
+	assert.deepEqual(pi.appendedEntries.map((entry) => entry.data.content), ["first", "second"]);
+	resetLedgerWriteLock();
+});
+
+test("saveLedgerEntry rejects true reentrancy explicitly", async () => {
+	resetLedgerWriteLock();
+	const pi = new MockPi();
+	const state = createState();
+
+	await assert.rejects(
+		() => saveLedgerEntry(pi as any, state, "outer", "outer", async () => {
+			await saveLedgerEntry(pi as any, state, "inner", "inner");
+		}),
+		/not reentrant/i,
+	);
+	assert.equal(state.ledger.size, 0);
+	resetLedgerWriteLock();
+});
+
+test("saveLedgerEntry releases the lock when assertWritable throws", async () => {
+	resetLedgerWriteLock();
+	const pi = new MockPi();
+	const state = createState();
+
+	await assert.rejects(
+		() => saveLedgerEntry(pi as any, state, "broken", "value", async () => {
+			throw new Error("blocked");
+		}),
+		/blocked/,
+	);
+	await assert.doesNotReject(() => saveLedgerEntry(pi as any, state, "fresh", "value"));
+	assert.equal(state.ledger.get("fresh"), "value");
+	resetLedgerWriteLock();
+});
+
+test("resetLedgerWriteLock clears abandoned lock state for later writes", async () => {
+	resetLedgerWriteLock();
+	const pi = new MockPi();
+	const state = createState();
+	const gate = createDeferred();
+	void saveLedgerEntry(pi as any, state, "stuck", "value", async () => {
+		await gate.promise;
+	});
+	await Promise.resolve();
+	resetLedgerWriteLock();
+
+	await assert.doesNotReject(() => saveLedgerEntry(pi as any, state, "fresh", "value"));
+	assert.equal(state.ledger.get("fresh"), "value");
+	gate.resolve();
+	resetLedgerWriteLock();
 });
 
 test("nested spawn invalidate rebuilds from the attached session transcript", () => {
@@ -1749,7 +2218,46 @@ test("nested spawn rapid events collapse to last state", () => {
 	assert.ok(finalLines.some((l: string) => l.includes("✓")));
 });
 
+// Narrow test: verifies the pendingToolCallCreations accumulation layer keeps the
+// last streamed args, overwriting on each message_update. The monkey-patch on
+// createToolComponent captures args before component creation. If the private
+// method is renamed, update the spy target.
+test("nested spawn uses the latest streamed tool-call args before first frame flush", () => {
+	resetSpawnFrameScheduler();
+	const state = createState();
+	const childSpawnTool = createChildSpawnTool(state);
+	const { session, emit } = createSubscribableSession([]);
+	state.childSessions.set("tool-call-1", session);
+	state.liveChildSessions.set("tool-call-1", session);
+
+	const component = childSpawnTool.renderResult(
+		{ content: [], details: { model: "m", thinking: "low", truncated: false } },
+		{ expanded: true },
+		theme,
+		createRenderContext(),
+	) as any;
+	let createdArgs: any;
+	component.createToolComponent = (_toolName: string, _toolCallId: string, args: any) => {
+		createdArgs = args;
+		return undefined;
+	};
+
+	emit({ type: "message_start", message: { role: "assistant", content: [] } });
+	emit({
+		type: "message_update",
+		message: { role: "assistant", content: [{ type: "toolCall", id: "tc-1", name: "inspect", arguments: { value: "old" } }] },
+	});
+	emit({
+		type: "message_update",
+		message: { role: "assistant", content: [{ type: "toolCall", id: "tc-1", name: "inspect", arguments: { value: "new" } }] },
+	});
+	flushSpawnFrameScheduler();
+
+	assert.deepEqual(createdArgs, { value: "new" });
+});
+
 test("nested spawn coalesces same-turn child events into one parent invalidate", async () => {
+	resetSpawnFrameScheduler();
 	const state = createState();
 	const childSpawnTool = createChildSpawnTool(state);
 	const { session, emit } = createSubscribableSession([]);
@@ -1768,17 +2276,126 @@ test("nested spawn coalesces same-turn child events into one parent invalidate",
 	emit({ type: "message_update", message: { role: "assistant", content: [{ type: "text", text: "file1" }] } });
 	emit({ type: "message_update", message: { role: "assistant", content: [{ type: "text", text: "file2" }] } });
 
-	// Microtask hasn't executed yet — still in the current synchronous turn.
-	// All three events are batched into one pending invalidate.
-	assert.equal(invalidateCalls, 0, "invalidate should wait for the queued microtask");
-	await flushMicrotasks();
-	assert.equal(invalidateCalls, 1, "same-turn events should share one invalidate");
+	assert.equal(invalidateCalls, 0, "child events do not invalidate synchronously");
+	flushSpawnFrameScheduler();
+	assert.equal(invalidateCalls, 1, "same-turn events coalesce into one invalidate");
 
 	const lines = component.render(120);
 	assert.ok(lines.some((l: string) => l.includes("file2")));
 });
 
-test("nested spawn renders state changes across microtask boundaries", async () => {
+test("nested spawn ignores child renderer invalidations during parent rebuild", async () => {
+	const state = createState();
+	const childSpawnTool = createChildSpawnTool(state);
+	const { session } = createSubscribableSession([]);
+	(session as any).getToolDefinition = (toolName: string) => toolName === "reentrant"
+		? {
+			name: "reentrant",
+			renderCall(_args: any, _theme: Theme, context: any) {
+				if (!context.state.didInvalidate) {
+					context.state.didInvalidate = true;
+					context.invalidate();
+				}
+				return new Text("reentrant", 0, 0);
+			},
+		}
+		: undefined;
+	state.childSessions.set("tool-call-1", session);
+	state.liveChildSessions.set("tool-call-1", session);
+	let invalidateCalls = 0;
+
+	const component = childSpawnTool.renderResult(
+		{ content: [], details: { model: "m", thinking: "low", truncated: false } },
+		{ expanded: false },
+		theme,
+		createRenderContext({ invalidate: () => { invalidateCalls++; } }),
+	) as any;
+	flushSpawnFrameScheduler();
+	assert.equal(invalidateCalls, 0, "initial empty attach does not invalidate");
+
+	(session as any).messages = [{
+		role: "assistant",
+		content: [{ type: "toolCall", id: "tc-1", name: "reentrant", arguments: {} }],
+	}];
+	component.invalidate();
+	flushSpawnFrameScheduler();
+
+	assert.equal(invalidateCalls, 0, "child renderer invalidate requests stay inside spawn rebuild");
+});
+
+test("nested spawn shared scheduler calls each distinct invalidate once per frame", async () => {
+	resetSpawnFrameScheduler();
+	const state = createState();
+	const childSpawnTool = createChildSpawnTool(state);
+	const first = createSubscribableSession([]);
+	const second = createSubscribableSession([]);
+	state.childSessions.set("tool-call-1", first.session);
+	state.liveChildSessions.set("tool-call-1", first.session);
+	state.childSessions.set("tool-call-2", second.session);
+	state.liveChildSessions.set("tool-call-2", second.session);
+	let firstInvalidates = 0;
+	let secondInvalidates = 0;
+
+	const firstComponent = childSpawnTool.renderResult(
+		{ content: [], details: { model: "m", thinking: "low", truncated: false } },
+		{ expanded: false },
+		theme,
+		createRenderContext({ toolCallId: "tool-call-1", invalidate: () => { firstInvalidates++; } }),
+	) as any;
+	const secondComponent = childSpawnTool.renderResult(
+		{ content: [], details: { model: "m", thinking: "low", truncated: false } },
+		{ expanded: false },
+		theme,
+		createRenderContext({ toolCallId: "tool-call-2", invalidate: () => { secondInvalidates++; } }),
+	) as any;
+
+	first.emit({ type: "message_start", message: { role: "assistant", content: [] } });
+	first.emit({ type: "message_update", message: { role: "assistant", content: [{ type: "text", text: "first latest" }] } });
+	second.emit({ type: "message_start", message: { role: "assistant", content: [] } });
+	second.emit({ type: "message_update", message: { role: "assistant", content: [{ type: "text", text: "second latest" }] } });
+
+	assert.equal(firstInvalidates, 0, "shared scheduler defers parent invalidate");
+	assert.equal(secondInvalidates, 0, "shared scheduler defers parent invalidate");
+	flushSpawnFrameScheduler();
+	assert.equal(firstInvalidates, 1);
+	assert.equal(secondInvalidates, 1);
+	assert.ok(firstComponent.render(120).some((l: string) => l.includes("first latest")));
+	assert.ok(secondComponent.render(120).some((l: string) => l.includes("second latest")));
+});
+
+test("nested spawn shared scheduler still coalesces duplicate invalidate callbacks", async () => {
+	resetSpawnFrameScheduler();
+	const state = createState();
+	const childSpawnTool = createChildSpawnTool(state);
+	const first = createSubscribableSession([]);
+	const second = createSubscribableSession([]);
+	state.childSessions.set("tool-call-1", first.session);
+	state.liveChildSessions.set("tool-call-1", first.session);
+	state.childSessions.set("tool-call-2", second.session);
+	state.liveChildSessions.set("tool-call-2", second.session);
+	let invalidateCalls = 0;
+	const invalidate = () => { invalidateCalls++; };
+
+	childSpawnTool.renderResult(
+		{ content: [], details: { model: "m", thinking: "low", truncated: false } },
+		{ expanded: false },
+		theme,
+		createRenderContext({ toolCallId: "tool-call-1", invalidate }),
+	);
+	childSpawnTool.renderResult(
+		{ content: [], details: { model: "m", thinking: "low", truncated: false } },
+		{ expanded: false },
+		theme,
+		createRenderContext({ toolCallId: "tool-call-2", invalidate }),
+	);
+
+	first.emit({ type: "message_start", message: { role: "assistant", content: [] } });
+	second.emit({ type: "message_start", message: { role: "assistant", content: [] } });
+	flushSpawnFrameScheduler();
+	assert.equal(invalidateCalls, 1, "identical callbacks still coalesce");
+});
+
+test("nested spawn renders state changes across frame boundaries", async () => {
 	const state = createState();
 	const childSpawnTool = createChildSpawnTool(state);
 	const { session, emit } = createSubscribableSession([]);
@@ -1794,18 +2411,18 @@ test("nested spawn renders state changes across microtask boundaries", async () 
 
 	// First batch: message_start sets thinking state, flush triggers render
 	emit({ type: "message_start", message: { role: "assistant", content: [] } });
-	await flushMicrotasks();
+	flushSpawnFrameScheduler();
 	const firstLines = component.render(120);
 	assert.ok(firstLines.some((l: string) => l.includes("thinking")));
 
 	// Second batch: message_update with new text, flush triggers new render
 	emit({ type: "message_update", message: { role: "assistant", content: [{ type: "text", text: "batch 2" }] } });
-	await flushMicrotasks();
+	flushSpawnFrameScheduler();
 	const secondLines = component.render(120);
 	assert.ok(secondLines.some((l: string) => l.includes("batch 2")));
 });
 
-test("nested spawn dispose cancels a queued parent invalidate", async () => {
+test("nested spawn dispose cancels pending and further invalidates after cleanup", async () => {
 	const state = createState();
 	const childSpawnTool = createChildSpawnTool(state);
 	const { session, emit } = createSubscribableSession([]);
@@ -1821,18 +2438,23 @@ test("nested spawn dispose cancels a queued parent invalidate", async () => {
 	) as any;
 
 	emit({ type: "message_start", message: { role: "assistant", content: [] } });
-	component.dispose();
-	await flushMicrotasks();
+	assert.equal(invalidateCalls, 0, "event does not invalidate synchronously");
 
-	// Parent invalidate was cancelled — no spurious callback after dispose
-	assert.equal(invalidateCalls, 0, "dispose cancels the queued parent invalidate");
+	component.dispose();
+	flushSpawnFrameScheduler();
+
+	// After dispose, emitting more events does not call invalidate
+	emit({ type: "message_update", message: { role: "assistant", content: [{ type: "text", text: "after" }] } });
+	flushSpawnFrameScheduler();
+	assert.equal(invalidateCalls, 0, "dispose cancels pending and future invalidates");
 
 	// Render still works after dispose without crashing
 	const lines = component.render(120);
 	assert.ok(lines.length > 0, "render after dispose should not crash");
 });
 
-test("nested spawn reattach clears a queued parent invalidate from the prior session", async () => {
+test("nested spawn reattach resets render guard for the new session", async () => {
+	resetSpawnFrameScheduler();
 	const state = createState();
 	const childSpawnTool = createChildSpawnTool(state);
 	const first = createSubscribableSession([]);
@@ -1848,7 +2470,10 @@ test("nested spawn reattach clears a queued parent invalidate from the prior ses
 	) as any;
 
 	first.emit({ type: "message_start", message: { role: "assistant", content: [] } });
+	flushSpawnFrameScheduler();
+	assert.equal(invalidateCalls, 1, "first session event triggers invalidate after scheduler flush");
 
+	// Reattach resets the render guard
 	const second = createSubscribableSession([{ role: "assistant", content: [{ type: "text", text: "replacement" }] }]);
 	state.childSessions.set("tool-call-1", second.session);
 	state.liveChildSessions.set("tool-call-1", second.session);
@@ -1859,12 +2484,9 @@ test("nested spawn reattach clears a queued parent invalidate from the prior ses
 		createRenderContext({ lastComponent: component, invalidate: () => { invalidateCalls++; } }),
 	) as any;
 
-	await flushMicrotasks();
-	assert.equal(invalidateCalls, 0, "reattach should cancel the queued invalidate from the prior session");
-
 	second.emit({ type: "message_update", message: { role: "assistant", content: [{ type: "text", text: "replacement 2" }] } });
-	await flushMicrotasks();
-	assert.equal(invalidateCalls, 1, "new session should still be able to request renders");
+	flushSpawnFrameScheduler();
+	assert.equal(invalidateCalls, 2, "second session event triggers another invalidate after reattach");
 	const lines = sameComponent.render(120);
 	assert.ok(lines.some((l: string) => l.includes("replacement 2")));
 });
@@ -1893,7 +2515,7 @@ test("nested spawn recovers batching state after event handler error", async () 
 
 		// Good event after error — should still schedule and render
 		emit({ type: "message_start", message: { role: "assistant", content: [] } });
-		await flushMicrotasks();
+		flushSpawnFrameScheduler();
 		const lines = component.render(120);
 		assert.ok(lines.some((l: string) => l.includes("thinking")),
 			"error recovery should allow subsequent events to render");
@@ -1904,7 +2526,48 @@ test("nested spawn recovers batching state after event handler error", async () 
 	}
 });
 
+test("nested spawn processes stale-state events without invalidating the parent", async () => {
+	resetSpawnFrameScheduler();
+	const state = createState();
+	const childSpawnTool = createChildSpawnTool(state);
+	const { session, emit } = createSubscribableSession([]);
+	state.childSessions.set("tool-call-1", session);
+	state.liveChildSessions.set("tool-call-1", session);
+	let invalidateCalls = 0;
+
+	const component = childSpawnTool.renderResult(
+		{ content: [{ type: "text", text: "initial" }], details: { model: "m", thinking: "low", truncated: false } },
+		{ expanded: false },
+		theme,
+		createRenderContext({ invalidate: () => { invalidateCalls++; } }),
+	) as any;
+	const before = component.render(120);
+
+	// Emit a message_start while the session is still fresh — triggers a render after flush
+	emit({ type: "message_start", message: { role: "assistant", content: [] } });
+	flushSpawnFrameScheduler();
+	assert.equal(invalidateCalls, 1, "fresh-session event triggers invalidate");
+
+	// Now mark the session stale
+	state.liveChildSessions.delete("tool-call-1");
+
+	// Subsequent events are dropped by handleEvent's isStaleSession check
+	emit({ type: "message_update", message: { role: "assistant", content: [{ type: "text", text: "stale" }] } });
+	flushSpawnFrameScheduler();
+	assert.equal(invalidateCalls, 1, "stale-session events do not invalidate");
+
+	// The optimistic event state was applied (message_start set thinking),
+	// but stale-session updates are dropped — the component shows the last
+	// known state before staleness, not a rolled-back version.
+	const after = component.render(120);
+	assert.ok(after.some((l: string) => l.includes("thinking")),
+		"optimistic event state from when session was still fresh is visible");
+	assert.ok(!after.some((l: string) => l.includes("stale")),
+		"stale-session events are dropped");
+});
+
 test("nested spawn cancels a queued parent invalidate when the session becomes stale before flush", async () => {
+	resetSpawnFrameScheduler();
 	const state = createState();
 	const childSpawnTool = createChildSpawnTool(state);
 	const { session, emit } = createSubscribableSession([]);
@@ -1922,11 +2585,10 @@ test("nested spawn cancels a queued parent invalidate when the session becomes s
 
 	emit({ type: "message_start", message: { role: "assistant", content: [] } });
 	state.liveChildSessions.delete("tool-call-1");
-	await flushMicrotasks();
+	flushSpawnFrameScheduler();
 
-	assert.equal(invalidateCalls, 0, "stale-before-flush sessions should cancel the queued parent invalidate");
-	const after = component.render(120);
-	assert.deepEqual(after, before, "stale-before-flush sessions should roll back optimistic event state");
+	assert.equal(invalidateCalls, 0, "stale-before-flush sessions cancel queued parent invalidates");
+	assert.deepEqual(component.render(120), before, "stale-before-flush sessions roll back optimistic event state");
 });
 
 test("nested spawn dispose then reattach streams new session events", async () => {
@@ -1944,7 +2606,7 @@ test("nested spawn dispose then reattach streams new session events", async () =
 	) as any;
 
 	first.emit({ type: "message_start", message: { role: "assistant", content: [] } });
-	await flushMicrotasks();
+	flushSpawnFrameScheduler();
 	component.dispose();
 
 	// Attach a second session to the same toolCallId after dispose
@@ -1962,7 +2624,7 @@ test("nested spawn dispose then reattach streams new session events", async () =
 
 	second.emit({ type: "message_start", message: { role: "assistant", content: [] } });
 	second.emit({ type: "message_update", message: { role: "assistant", content: [{ type: "text", text: "session B output" }] } });
-	await flushMicrotasks();
+	flushSpawnFrameScheduler();
 
 	const lines = reattached.render(120);
 	assert.ok(lines.some((l: string) => l.includes("session B output")),
@@ -2424,6 +3086,7 @@ test("registerSpawnTool registers a tool with correct name and metadata", () => 
 	assert.equal(typeof tool.execute, "function");
 	assert.equal(typeof tool.renderCall, "function");
 	assert.equal(typeof tool.renderResult, "function");
+	assert.equal(tool.renderShell, "self");
 	// parameters are a TypeBox schema object — just verify it exists
 	assert.ok(tool.parameters, "should have parameters");
 	assert.equal(tool.executionMode, undefined, "spawn should not be sequential");
