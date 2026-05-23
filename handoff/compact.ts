@@ -5,8 +5,9 @@
  * pre-handoff messages in LLM context.
  */
 
-import type { ExtensionAPI, SessionEntry } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
 import type { AgenticodingState } from "../state.js";
+import { STATUS_KEY_HANDOFF } from "../tui.js";
 
 function getImpossibleKeptId(branchEntries: SessionEntry[]): string {
 	const leaf = branchEntries[branchEntries.length - 1];
@@ -14,7 +15,7 @@ function getImpossibleKeptId(branchEntries: SessionEntry[]): string {
 }
 
 export function registerHandoffCompaction(pi: ExtensionAPI, state: AgenticodingState): void {
-	pi.on("session_before_compact", async (event) => {
+	pi.on("session_before_compact", async (event, ctx: ExtensionContext) => {
 		const pending = state.pendingHandoff;
 		if (!pending) {
 			return;
@@ -22,6 +23,11 @@ export function registerHandoffCompaction(pi: ExtensionAPI, state: AgenticodingS
 
 		state.pendingHandoff = null;
 		state.pendingRequestedHandoff = null;
+
+		// Clear the handoff progress indicator now that compaction is consuming it
+		if (ctx.hasUI) {
+			ctx.ui.setStatus(STATUS_KEY_HANDOFF, undefined);
+		}
 
 		return {
 			compaction: {

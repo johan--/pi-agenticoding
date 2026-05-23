@@ -12,6 +12,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import type { AgenticodingState } from "../state.js";
+import { STATUS_KEY_HANDOFF } from "../tui.js";
 
 const MAX_INLINE_ENTRIES = 3;
 const MAX_INLINE_CHARS = 4000;
@@ -136,6 +137,9 @@ export function registerHandoffTool(
 					// Safe: pendingRequestedHandoff may already be cleaned up by watchdog
 					if (state.pendingRequestedHandoff) {
 						state.pendingRequestedHandoff.toolCalled = false;
+					}
+					if (ctx.hasUI) {
+						ctx.ui.setStatus(STATUS_KEY_HANDOFF, undefined);
 					}
 				},
 			});

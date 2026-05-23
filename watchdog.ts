@@ -10,6 +10,7 @@
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AgenticodingState } from "./state.js";
+import { STATUS_KEY_HANDOFF } from "./tui.js";
 
 /** Build a nudge string with the exact percent interpolated. */
 export function buildNudge(percent: number): string {
@@ -47,6 +48,9 @@ export function registerWatchdog(pi: ExtensionAPI, state: AgenticodingState): vo
 			requestedHandoff.enforcementAttempts += 1;
 			if (!requestedHandoff.toolCalled) {
 				state.pendingRequestedHandoff = null;
+				if (ctx.hasUI) {
+					ctx.ui.setStatus(STATUS_KEY_HANDOFF, undefined);
+				}
 			}
 		}
 
