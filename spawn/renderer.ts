@@ -4,6 +4,15 @@
  * Provides the live-updating NestedAgentSessionComponent that renders a
  * child agent's ongoing work in the parent's TUI, plus the renderCall
  * and renderResult functions used by the spawn tool definitions.
+ *
+ * Event→render flow:
+ *   High-frequency events (message_update, tool_execution_update) accumulate
+ *   state cheaply per-event and defer expensive component operations to a
+ *   frame-based scheduler (~30 FPS).  Low-frequency terminal events
+ *   (message_start/end, tool_execution_start/end) apply immediately.
+ *
+ *   This decouples LLM streaming rate (50-100+ events/sec) from TUI update
+ *   rate, keeping the main thread responsive.
  */
 
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
@@ -20,7 +29,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 import type { Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
-import { Container, Spacer, Text, truncateToWidth } from "@earendil-works/pi-tui";
+import { Container, Spacer, Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { TUI } from "@earendil-works/pi-tui";
 import type { AgenticodingState } from "../state.js";
 import {
@@ -38,6 +47,11 @@ const TOOL_RESULT_PREVIEW_CHARS = 60;
 const LIVE_TEXT_PREVIEW_CHARS = 80;
 const COST_THRESHOLD_COMPACT = 1000;
 const COST_THRESHOLD_DECIMAL = 10;
+const SPAWN_SHELL_PADDING_X = 1;
+const SPAWN_SHELL_PADDING_Y = 1;
+
+/** Frame interval for the TUI render scheduler (~30 FPS). */
+const RENDER_FRAME_MS = 33;
 
 // ── Render-only types ────────────────────────────────────────────────
 
@@ -141,6 +155,156 @@ function safeKeyHint(action: string, fallback: string): string {
 	}
 }
 
+function equalStats(a?: Record<string, number>, b?: Record<string, number>): boolean {
+	if (a === b) return true;
+	if (!a || !b) return false;
+	const keys = Object.keys(a);
+	return keys.length === Object.keys(b).length && keys.every(key => a[key] === b[key]);
+}
+
+function padVisibleWidth(text: string, width: number): string {
+	const vw = visibleWidth(text);
+	return vw >= width ? text : text + " ".repeat(width - vw);
+}
+
+function getShellBackground(theme: Theme | undefined, outcome: SpawnOutcome): ((text: string) => string) | undefined {
+	// Theme.bg() is a TUI extension API available on runtime themes beyond the
+	// base Theme type. The typeof guard prevents crashes in tests or headless
+	// mode where bg may not exist. The (theme as any) cast is unavoidable
+	// without extending the Theme interface.
+	if (!theme || typeof (theme as any).bg !== "function") return undefined;
+	const bgName = outcome === "success"
+		? "toolSuccessBg"
+		: outcome === "error" || outcome === "aborted"
+			? "toolErrorBg"
+			: "toolPendingBg";
+	return (text: string) => (theme as any).bg(bgName, text);
+}
+
+function wrapSpawnShell(lines: string[], width: number, theme: Theme | undefined, outcome: SpawnOutcome, expanded: boolean): string[] {
+	const shellWidth = Math.max(1, width);
+	const innerWidth = Math.max(1, shellWidth - (SPAWN_SHELL_PADDING_X * 2));
+	const paddingY = expanded ? SPAWN_SHELL_PADDING_Y : 0;
+	const bg = getShellBackground(theme, outcome);
+	const fill = (text: string) => bg ? bg(text) : text;
+	const blank = fill(" ".repeat(shellWidth));
+	const wrapped = lines.map(line => fill(
+		`${" ".repeat(SPAWN_SHELL_PADDING_X)}${padVisibleWidth(line, innerWidth)}${" ".repeat(SPAWN_SHELL_PADDING_X)}`,
+	));
+	return [
+		...Array.from({ length: paddingY }, () => blank),
+		...(wrapped.length > 0 ? wrapped : [blank]),
+		...Array.from({ length: paddingY }, () => blank),
+	];
+}
+
+function formatCollapsedStats(details: SpawnResultDetails, color: (name: ThemeColor, text: string) => string): string | undefined {
+	if (details.stats) {
+		const s = details.stats;
+		const cost = s.cost ?? 0;
+		const costStr = cost >= COST_THRESHOLD_COMPACT ? cost.toFixed(0) : cost >= COST_THRESHOLD_DECIMAL ? cost.toFixed(2) : cost.toFixed(4);
+		const truncated = details.truncated ? color("warning", " · trunc") : "";
+		return color("dim", `tok ${s.inputTokens ?? "?"}/${s.outputTokens ?? "?"} · ${s.turns ?? "?"}t · $${costStr}${truncated}`);
+	}
+	if (details.statsUnavailable) {
+		return color("muted", "stats unavailable");
+	}
+	return undefined;
+}
+
+// ── NestedAgentSessionComponent forward reference ────────────────────
+
+/**
+ * Minimal interface the frame scheduler needs from a component.
+ * Lets the scheduler batch without importing the full class.
+ */
+interface SpawnFrameTarget {
+	flushPendingUpdates(): void;
+	clearRenderCache(): void;
+	flushScheduledRender(): (() => void) | undefined;
+}
+
+// ── Frame-based render scheduler ────────────────────────────────────
+
+/**
+ * Aggregates per-event dirty markers across all spawn components and flushes
+ * expensive component work (updateContent, updateResult, cache clear, TUI
+ * invalidate) at a fixed frame rate (~30 FPS by default).
+ *
+ * This replaces the previous microtask-per-event approach so that high-volume
+ * streaming events (50-100+/sec) do not trigger an equal number of heavy
+ * component mutations.
+ */
+class SpawnFrameScheduler {
+	private readonly frameMs: number;
+	private dirtyComponents = new Set<SpawnFrameTarget>();
+	private frameTimer: ReturnType<typeof setTimeout> | null = null;
+
+	constructor(frameMs: number = RENDER_FRAME_MS) {
+		this.frameMs = frameMs;
+	}
+
+	/** Mark a component as dirty — will be flushed on the next frame tick. */
+	markDirty(component: SpawnFrameTarget): void {
+		this.dirtyComponents.add(component);
+		if (!this.frameTimer) {
+			this.frameTimer = setTimeout(() => this.flush(), this.frameMs);
+		}
+	}
+
+	/** Remove a component from the dirty set (dispose, stale, rebuild). */
+	cancelDirty(component: SpawnFrameTarget): void {
+		this.dirtyComponents.delete(component);
+	}
+
+	/** Flush all pending dirty components immediately. Used in tests and synchronous rebuild paths. */
+	flushNow(): void {
+		if (this.frameTimer) {
+			clearTimeout(this.frameTimer);
+			this.frameTimer = null;
+		}
+		this.flush();
+	}
+
+	/** Cancel the pending timer and clear all dirty state. */
+	clear(): void {
+		if (this.frameTimer) {
+			clearTimeout(this.frameTimer);
+			this.frameTimer = null;
+		}
+		this.dirtyComponents.clear();
+	}
+
+	private flush(): void {
+		this.frameTimer = null;
+		const batch = [...this.dirtyComponents];
+		this.dirtyComponents.clear();
+
+		const requestRenders = new Set<() => void>();
+		for (const component of batch) {
+			// 1. Apply accumulated event state to rendering components
+			component.flushPendingUpdates();
+			// 2. Invalidate render cache so render() recomputes on next TUI paint
+			component.clearRenderCache();
+			// 3. Collect TUI invalidate
+			const r = component.flushScheduledRender();
+			if (r) requestRenders.add(r);
+		}
+		// One invalidate per distinct callback per frame tick.
+		for (const requestRender of requestRenders) {
+			requestRender();
+		}
+
+		// If more components were dirtied during flush, schedule another frame
+		if (this.dirtyComponents.size > 0) {
+			this.frameTimer = setTimeout(() => this.flush(), this.frameMs);
+		}
+	}
+}
+
+/** Module-level singleton shared by all NestedAgentSessionComponent instances. */
+const spawnFrameScheduler = new SpawnFrameScheduler();
+
 // ── NestedAgentSessionComponent ───────────────────────────────────────
 
 /**
@@ -156,10 +320,13 @@ function safeKeyHint(action: string, fallback: string): string {
  *      executions and assistant messages in real time, maintains live action
  *      tracking via lastAction field updated on every event.
  *
- * Render caching: caches output by width/expanded/showImages to avoid
- * unnecessary re-renders when none of those inputs changed.
+ * Event batching:
+ *   High-frequency events (message_update, tool_execution_update) store the
+ *   latest payload and mark the component dirty. A frame-based scheduler
+ *   applies accumulated state to rendering components at ~30 FPS, preventing
+ *   the TUI from being overwhelmed by LLM streaming volume.
  */
-class NestedAgentSessionComponent extends Container {
+class NestedAgentSessionComponent extends Container implements SpawnFrameTarget {
 	private session?: AgentSession;
 	private pendingTools = new Map<string, ToolExecutionComponent>();
 	private toolComponents = new Set<ToolExecutionComponent>();
@@ -170,10 +337,10 @@ class NestedAgentSessionComponent extends Container {
 	private requestRender: () => void = () => {};
 	private readonly markdownTheme = getMarkdownTheme();
 	// Minimal TUI mock for ToolExecutionComponent/BashExecutionComponent.
-	// Spawn runs in-memory without a real TUI — only requestRender is needed
-	// to trigger parent re-renders when child events arrive.
+	// Parent invalidation is one-way from child session events below; renderer-
+	// internal invalidations must not re-enter the parent render loop.
 	private readonly fakeUi = {
-		requestRender: () => this.requestRender(),
+		requestRender: () => {},
 	} as { requestRender: () => void };
 	private details?: SpawnResultDetails;
 	private nestTheme?: Theme;
@@ -190,48 +357,65 @@ class NestedAgentSessionComponent extends Container {
 	private cachedLines?: string[];
 	private cachedShowImages?: boolean;
 
-	/** Tracks whether a render microtask is already queued for this batch. */
-	private renderScheduled = false;
-	/** Monotonic token: incrementing invalidates stale queued microtask callbacks. */
-	private renderScheduleToken = 0;
+	// ── Frame-batched accumulation state ──────────────────────────
+	/** Latest assistant message from message_update events (overwritten per event). Applied at frame time. */
+	private pendingAssistantMessage?: Extract<AgentSessionEvent, { type: "message_update" }>["message"];
+	/** Tool calls seen in message_update that need ToolExecutionComponents created. */
+	private pendingToolCallCreations = new Map<string, { name: string; id: string; args: Record<string, unknown> }>();
+	/** Latest partial result per toolCallId from tool_execution_update events. Applied at frame time. */
+	private pendingToolResults = new Map<string, ToolResultLike>();
 
-	private clearRenderCache(): void {
+	// ── Render scheduling state ───────────────────────────────────
+	private renderQueued = false;
+	private renderScheduleToken = 0;
+	private queuedRenderToken?: number;
+
+	clearRenderCache(): void {
 		this.cachedWidth = undefined;
 		this.cachedExpanded = undefined;
 		this.cachedLines = undefined;
 		this.cachedShowImages = undefined;
 	}
 
-	/** Reset batching guard + invalidate any queued microtask via token bump. */
+	/** Cancel pending frame-scheduler work for this component. */
 	private resetRenderBatching(): void {
-		this.renderScheduled = false;
+		this.renderQueued = false;
+		this.queuedRenderToken = undefined;
 		this.renderScheduleToken++;
+		spawnFrameScheduler.cancelDirty(this);
 	}
 
 	/**
-	 * Queue one microtask per event batch. The token guard prevents stale
-	 * callbacks from running after dispose or error resets the batching state.
+	 * Schedule a TUI invalidate on the next frame tick.
+	 * This is the only path that sets renderQueued for the scheduler to pick up.
+	 * Called from non-event paths (setExpanded, setShowImages, etc.) and from
+	 * terminal event handlers (message_end, tool_execution_end).
 	 */
 	private scheduleRender(): void {
-		if (this.renderScheduled) {
-			return;
+		if (this.renderQueued) return;
+		this.renderQueued = true;
+		this.queuedRenderToken = ++this.renderScheduleToken;
+		spawnFrameScheduler.markDirty(this);
+	}
+
+	/**
+	 * Called by the frame scheduler after flushPendingUpdates + clearRenderCache.
+	 * Returns the TUI invalidate function if this component has work pending.
+	 * Also detects stale sessions and triggers a full rebuild.
+	 */
+	flushScheduledRender(): (() => void) | undefined {
+		if (!this.renderQueued || this.queuedRenderToken !== this.renderScheduleToken) {
+			return undefined;
 		}
-		this.renderScheduled = true;
-		const token = ++this.renderScheduleToken;
-		queueMicrotask(() => {
-			if (!this.renderScheduled || this.renderScheduleToken !== token) {
-				return;
-			}
-			this.renderScheduled = false;
-			if (this.isStaleSession()) {
-				// Drop optimistic same-turn event mutations when ownership changed
-				// before the parent had a chance to render them.
-				this.rebuildFromSession();
-				this.clearRenderCache();
-				return;
-			}
-			this.requestRender();
-		});
+		this.renderQueued = false;
+		this.queuedRenderToken = undefined;
+		if (this.isStaleSession()) {
+			this.clearPendingState();
+			this.rebuildFromSession();
+			this.clearRenderCache();
+			return undefined;
+		}
+		return this.requestRender;
 	}
 
 	setRequestRender(requestRender: () => void): void {
@@ -257,7 +441,15 @@ class NestedAgentSessionComponent extends Container {
 	}
 
 	setDetails(details: SpawnResultDetails, theme: Theme): void {
-		const changed = this.details !== details || this.nestTheme !== theme;
+		const prior = this.details;
+		const changed = !prior
+			|| prior.model !== details.model
+			|| prior.thinking !== details.thinking
+			|| prior.truncated !== details.truncated
+			|| prior.outcome !== details.outcome
+			|| !equalStats(prior.stats, details.stats)
+			|| prior.statsUnavailable !== details.statsUnavailable
+			|| this.nestTheme !== theme;
 		this.details = details;
 		this.nestTheme = theme;
 		this.liveOutcome = details.outcome;
@@ -280,6 +472,7 @@ class NestedAgentSessionComponent extends Container {
 
 		this.unsubscribe?.();
 		this.unsubscribe = undefined;
+		this.clearPendingState();
 		this.session = session;
 		this.ownedToolCallId = toolCallId;
 		this.state = state;
@@ -305,9 +498,9 @@ class NestedAgentSessionComponent extends Container {
 	override invalidate(): void {
 		super.invalidate();
 		this.clearRenderCache();
-		if (this.session) {
-			this.rebuildFromSession();
-		}
+		// Events maintain the component tree incrementally via handleEvent().
+		// rebuildFromSession() destructively resets lastAction to "",
+		// causing "⏳ initializing…" to flash on every frame scheduler tick.
 	}
 
 	hasSession(): boolean {
@@ -348,12 +541,15 @@ class NestedAgentSessionComponent extends Container {
 	dispose(): void {
 		this.unsubscribe?.();
 		this.unsubscribe = undefined;
+		spawnFrameScheduler.cancelDirty(this);
+		this.clearPendingState();
 		// Snapshot fields before clearing: if session.abort() triggers re-entrant
 		// dispose, the nulled-out fields prevent double-abort.
 		const session = this.session;
 		const ownedToolCallId = this.ownedToolCallId;
 		const liveChildSessions = this.state?.liveChildSessions;
 		this.resetRenderBatching();
+		this.requestRender = () => {};
 		this.clearRenderCache();
 		this.details = undefined;
 		this.nestTheme = undefined;
@@ -369,6 +565,68 @@ class NestedAgentSessionComponent extends Container {
 			liveChildSessions.delete(ownedToolCallId);
 		}
 	}
+
+	// ── Frame-batched update support ─────────────────────────────────
+
+	/** Clear all accumulated pending state (new session, dispose, rebuild). */
+	private clearPendingState(): void {
+		this.pendingAssistantMessage = undefined;
+		this.pendingToolCallCreations.clear();
+		this.pendingToolResults.clear();
+	}
+
+	/**
+	 * Apply accumulated event state to actual rendering components.
+	 * Called by the frame scheduler once per frame tick.
+	 *
+	 * Three operations deferred from per-event handlers:
+	 *   1. Update the streaming AssistantMessageComponent with the latest message.
+	 *   2. Create ToolExecutionComponents for tool calls announced in streaming chunks.
+	 *   3. Apply the latest partial result to each live ToolExecutionComponent.
+	 */
+	flushPendingUpdates(): void {
+		// 1. Apply latest streaming message to the assistant component
+		if (this.pendingAssistantMessage && this.streamingComponent) {
+			try {
+				this.streamingComponent.updateContent(this.pendingAssistantMessage);
+			} catch (error) {
+				this.resetStreamingComponent(error, "message_update");
+			}
+			this.pendingAssistantMessage = undefined;
+		}
+
+		// 2. Create tool components for tool calls announced in streaming chunks
+		if (this.pendingToolCallCreations.size > 0) {
+			// If message_end already ran, streamingComponent is gone and
+			// these new components missed the setArgsComplete() call.
+			const streamingDone = !this.streamingComponent;
+			for (const [id, info] of this.pendingToolCallCreations) {
+				if (this.pendingTools.has(id)) continue;
+				const component = this.createToolComponent(info.name, info.id, info.args);
+				this.addToolComponent(component);
+				if (component) {
+					this.pendingTools.set(id, component);
+					if (streamingDone) {
+						component.setArgsComplete();
+					}
+				}
+			}
+			this.pendingToolCallCreations.clear();
+		}
+
+		// 3. Apply latest partial results to live tool components
+		if (this.pendingToolResults.size > 0) {
+			for (const [toolCallId, result] of this.pendingToolResults) {
+				const component = this.pendingTools.get(toolCallId);
+				if (component) {
+					component.updateResult({ ...result, isError: false }, true);
+				}
+			}
+			this.pendingToolResults.clear();
+		}
+	}
+
+	// ── Component tree helpers ───────────────────────────────────────
 
 	private addToolComponent(component?: ToolExecutionComponent): void {
 		if (!component) return;
@@ -458,6 +716,10 @@ class NestedAgentSessionComponent extends Container {
 	private rebuildFromSession(): void {
 		if (!this.session) return;
 
+		// Flush any pending state first so accumulated updates don't double-apply
+		spawnFrameScheduler.cancelDirty(this);
+		this.clearPendingState();
+
 		this.clear();
 		this.pendingTools.clear();
 		this.toolComponents.clear();
@@ -517,7 +779,10 @@ class NestedAgentSessionComponent extends Container {
 		) {
 			return this.cachedLines;
 		}
-		const lines = this.expanded ? this.renderExpanded(width) : this.renderCollapsed(width);
+		const shellWidth = Math.max(1, width);
+		const contentWidth = Math.max(1, shellWidth - (SPAWN_SHELL_PADDING_X * 2));
+		const contentLines = this.expanded ? this.renderExpanded(contentWidth) : this.renderCollapsed(contentWidth);
+		const lines = wrapSpawnShell(contentLines, shellWidth, this.nestTheme, this.liveOutcome, this.expanded);
 		this.cachedWidth = width;
 		this.cachedExpanded = this.expanded;
 		this.cachedShowImages = this.showImages;
@@ -575,16 +840,9 @@ class NestedAgentSessionComponent extends Container {
 			}
 		}
 
-		// Token/cost summary — quick usage check without expanding
-		if (details?.stats) {
-			const s = details.stats;
-			const cost = s.cost ?? 0;
-			const costStr = cost >= COST_THRESHOLD_COMPACT ? cost.toFixed(0) : cost >= COST_THRESHOLD_DECIMAL ? cost.toFixed(2) : cost.toFixed(4);
-			const truncated = details.truncated ? color("warning", " [truncated]") : "";
-			const statsLine = `tokens: ${s.inputTokens ?? "?"}/${s.outputTokens ?? "?"} · ${s.turns ?? "?"} turns · $${costStr}${truncated}`;
-			lines.push(truncateToWidth(color("dim", statsLine), width));
-		} else if (details?.statsUnavailable) {
-			lines.push(truncateToWidth(color("muted", "stats unavailable"), width));
+		const statsLine = details ? formatCollapsedStats(details, color) : undefined;
+		if (statsLine) {
+			lines.push(truncateToWidth(statsLine, width));
 		}
 
 		return lines;
@@ -627,6 +885,24 @@ class NestedAgentSessionComponent extends Container {
 		console.warn(`[spawn] streaming component error (${eventType}):`, this.ownedToolCallId, error);
 	}
 
+	// ── Event handlers ───────────────────────────────────────────────
+
+	/**
+	 * Handling strategy:
+	 *
+	 *   High-frequency              | Low-frequency (terminal)
+	 *   ────────────────────────────┼────────────────────────────────
+	 *   message_update: accumulate  | message_start:   apply immediately
+	 *   tool_execution_update: acc  | message_end:     apply immediately
+	 *                                | tool_execution_start: apply immediately
+	 *                                | tool_execution_end: apply immediately
+	 *
+	 * "Terminal" events happen once per phase and must reach final state
+	 * synchronously so the next phase (or child completion) sees correct data.
+	 * "Update" events stream at high volume and only the latest snapshot
+	 * matters for display.
+	 */
+
 	private handleMessageStart(event: Extract<AgentSessionEvent, { type: "message_start" }>): void {
 		if (event.message.role === "custom" || event.message.role === "user") {
 			this.addMessageToChat(event.message);
@@ -645,28 +921,36 @@ class NestedAgentSessionComponent extends Container {
 		}
 	}
 
+	/**
+	 * High-frequency: accumulates the latest message payload instead of calling
+	 * updateContent per event. Expensive component work is deferred to the
+	 * frame scheduler's flushPendingUpdates.
+	 */
 	private handleMessageUpdate(event: Extract<AgentSessionEvent, { type: "message_update" }>): void {
 		if (event.message.role !== "assistant") return;
-		if (this.streamingComponent) {
-			try {
-				this.streamingComponent.updateContent(event.message);
-			} catch (error) {
-				this.resetStreamingComponent(error, "message_update");
-			}
-		}
+
+		// Store the latest message; only the last one before the frame tick matters
+		this.pendingAssistantMessage = event.message;
+
+		// Track new tool call IDs so flushPendingUpdates can create components
 		for (const content of event.message.content ?? []) {
 			if (content.type !== "toolCall") continue;
-			let component = this.pendingTools.get(content.id);
-			if (!component) {
-				component = this.createToolComponent(content.name, content.id, content.arguments ?? {});
-				this.addToolComponent(component);
-				if (component) {
-					this.pendingTools.set(content.id, component);
-				}
+			if (this.pendingTools.has(content.id)) {
+				// Already tracked — just update args (cheap)
+				this.pendingTools.get(content.id)!.updateArgs(content.arguments ?? {});
 			} else {
-				component.updateArgs(content.arguments ?? {});
+				// Keep the latest announced args until frame-time creation.
+				// Streamed tool-call arguments often grow over multiple chunks before
+				// the first flush, so first-write-wins would show stale/incomplete args.
+				this.pendingToolCallCreations.set(content.id, {
+					name: content.name,
+					id: content.id,
+					args: content.arguments ?? {},
+				});
 			}
 		}
+
+		// Cheap per-event: update the live action text preview
 		const textBlock = event.message.content?.find(
 			(c: any) => c.type === "text" && c.text,
 		);
@@ -678,8 +962,16 @@ class NestedAgentSessionComponent extends Container {
 		}
 	}
 
+	/**
+	 * Terminal event: applies final message state synchronously and clears the
+	 * streaming component. Also updates outcome and pending tool states.
+	 */
 	private handleMessageEnd(event: Extract<AgentSessionEvent, { type: "message_end" }>): void {
 		if (event.message.role !== "assistant") return;
+
+		// Clear any pending streaming message (the end event is authoritative)
+		this.pendingAssistantMessage = undefined;
+
 		if (this.streamingComponent) {
 			try {
 				this.streamingComponent.updateContent(event.message);
@@ -706,8 +998,13 @@ class NestedAgentSessionComponent extends Container {
 			}
 		}
 		this.streamingComponent = undefined;
+		// No scheduleRender call — the frame scheduler will pick up the state change
 	}
 
+	/**
+	 * Terminal event: creates the tool component synchronously so the user sees
+	 * the tool name immediately. Result content is deferred to frame-time updates.
+	 */
 	private handleToolExecutionStart(event: Extract<AgentSessionEvent, { type: "tool_execution_start" }>): void {
 		this.liveOutcome = "running";
 		let component = this.pendingTools.get(event.toolCallId);
@@ -723,26 +1020,34 @@ class NestedAgentSessionComponent extends Container {
 		component?.markExecutionStarted();
 	}
 
+	/**
+	 * High-frequency: stores the latest partial result per toolCallId.
+	 * Expensive updateResult call is deferred to the frame scheduler.
+	 */
 	private handleToolExecutionUpdate(event: Extract<AgentSessionEvent, { type: "tool_execution_update" }>): void {
-		const component = this.pendingTools.get(event.toolCallId);
-		// Update live action and flush render cache even when the tool
-		// component isn't tracked (e.g. createToolComponent failed in
-		// test or degraded environment).
+		// Update live action regardless of component availability (cheap)
 		const name = this.toolNames.get(event.toolCallId) ?? "tool";
 		const preview = this.extractPreview(asToolResult(event.partialResult));
 		this.lastAction = preview
 			? `[${name}] ${preview}`
 			: `[${name}] …`;
-		if (component) {
-			component.updateResult({ ...asToolResult(event.partialResult), isError: false }, true);
+
+		// Store the latest partial result; overwritten per event — only the
+		// latest matters at display time.
+		if (this.pendingTools.has(event.toolCallId)) {
+			this.pendingToolResults.set(event.toolCallId, asToolResult(event.partialResult));
 		}
 	}
 
+	/**
+	 * Terminal event: applies the final result synchronously and cleans up
+	 * tracking maps.
+	 */
 	private handleToolExecutionEnd(event: Extract<AgentSessionEvent, { type: "tool_execution_end" }>): void {
+		// Clear any pending results for this tool (the end event is authoritative)
+		this.pendingToolResults.delete(event.toolCallId);
+
 		const component = this.pendingTools.get(event.toolCallId);
-		// Update live action and flush render cache even without a
-		// tracked tool component, so the "✓"/"✗" state is always
-		// reflected in the next render.
 		const name = this.toolNames.get(event.toolCallId) ?? "tool";
 		this.toolNames.delete(event.toolCallId);
 		this.pendingTools.delete(event.toolCallId);
@@ -752,8 +1057,21 @@ class NestedAgentSessionComponent extends Container {
 		if (component) {
 			component.updateResult({ ...asToolResult(event.result), isError: event.isError });
 		}
+		// No scheduleRender call — the frame scheduler will pick up the state change
 	}
 
+	/**
+	 * Central event dispatch.
+	 *
+	 * Every event clears the cheap render cache (4 field assignments) so that
+	 * render() returns fresh data.  The actual TUI invalidate is deferred to
+	 * the frame scheduler via scheduleRender, which coalesces multiple events
+	 * into one invalidate per frame tick.
+	 *
+	 * Expensive component work (updateContent, updateResult, component creation)
+	 * is deferred by the per-handler accumulation pattern — see
+	 * handleMessageUpdate and handleToolExecutionUpdate.
+	 */
 	private handleEvent(event: AgentSessionEvent): void {
 		if (this.isStaleSession()) {
 			return;
@@ -768,10 +1086,11 @@ class NestedAgentSessionComponent extends Container {
 				case "tool_execution_update": this.handleToolExecutionUpdate(event); break;
 				case "tool_execution_end": this.handleToolExecutionEnd(event); break;
 			}
+			// Per-event cache clear ensures render() returns fresh data if called
+			// between frame ticks. The frame scheduler also clears the cache during
+			// flush — this is intentionally redundant so the render cache is always
+			// correct for synchronous access (tests, in-between paints).
 			this.clearRenderCache();
-			// Coalesce child bursts within the current turn. The first event queues
-			// one microtask-backed parent invalidate; later same-turn events just
-			// mutate state, so the next render observes the latest snapshot.
 			this.scheduleRender();
 		} catch (error) {
 			this.clearRenderCache();
@@ -804,7 +1123,7 @@ function renderSpawnCall(args: any, theme: Theme, context: { expanded: boolean }
 	if (remaining > 0) {
 		text += theme.fg("muted", `\n... (${remaining} more lines, ${safeKeyHint("app.tools.expand", "to expand")})`);
 	}
-	return new Text(text, 0, 0);
+	return new Text(text, SPAWN_SHELL_PADDING_X, SPAWN_SHELL_PADDING_Y, getShellBackground(theme, "running"));
 }
 
 /**
@@ -865,7 +1184,27 @@ function renderSpawnResult(
 		status ? theme.fg(outcome === "error" ? "warning" : "dim", status) : "",
 		theme.fg("toolOutput", summary),
 	].filter(Boolean).join("\n");
-	return new Text(text, 0, 0);
+	return new Text(text, SPAWN_SHELL_PADDING_X, SPAWN_SHELL_PADDING_Y, getShellBackground(theme, outcome));
 }
 
 export { NestedAgentSessionComponent, renderSpawnCall, renderSpawnResult };
+
+// ── Test support ──────────────────────────────────────────────────────
+
+/**
+ * Synchronously flush all pending spawn frame work.
+ * Exported for tests.  Not needed in production — the frame timer handles
+ * everything automatically.
+ */
+export function flushSpawnFrameScheduler(): void {
+	spawnFrameScheduler.flushNow();
+}
+
+/**
+ * Reset the frame scheduler, discarding any pending dirty markers.
+ * Exported for tests.  In production the scheduler lifecycle is tied to
+ * component dispose(), so this is never needed.
+ */
+export function resetSpawnFrameScheduler(): void {
+	spawnFrameScheduler.clear();
+}

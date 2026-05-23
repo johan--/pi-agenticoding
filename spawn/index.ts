@@ -402,6 +402,7 @@ export function registerSpawnTool(
 		promptSnippet: SPAWN_PROMPT_SNIPPET,
 		promptGuidelines: SPAWN_PROMPT_GUIDELINES,
 		parameters: SPAWN_PARAMETERS,
+		renderShell: "self",
 
 		async execute(
 			_toolCallId: string,
