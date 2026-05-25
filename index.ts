@@ -25,12 +25,15 @@ import { CONTEXT_PRIMER } from "./system-prompt.js";
 import { buildNudge, registerWatchdog } from "./watchdog.js";
 import { registerNotebookTools } from "./notebook/tools.js";
 import { registerNotebookRehydration } from "./notebook/rehydration.js";
+import { registerNotebookTopicTool } from "./notebook/topic-tool.js";
+import { setActiveNotebookTopic } from "./notebook/topic.js";
 import { registerHandoffTool } from "./handoff/tool.js";
 import { registerHandoffCommand } from "./handoff/command.js";
 import { registerHandoffCompaction } from "./handoff/compact.js";
 import { registerSpawnTool } from "./spawn/index.js";
 import {
 	STATUS_KEY_HANDOFF,
+	STATUS_KEY_TOPIC,
 	WIDGET_KEY_WARNING,
 	updateIndicators,
 } from "./tui.js";
@@ -41,6 +44,7 @@ export default function (pi: ExtensionAPI): void {
 
 	// ── Register all tools ──────────────────────────────────────────
 	registerNotebookTools(pi, state);
+	registerNotebookTopicTool(pi, state);
 	registerHandoffTool(pi, state);
 	registerSpawnTool(pi, state);
 
@@ -54,8 +58,20 @@ export default function (pi: ExtensionAPI): void {
 
 	// ── /notebook command — interactive page selector ────────────────
 	pi.registerCommand("notebook", {
-		description: "Select a notebook page to preview",
-		handler: async (_args, ctx) => {
+		description: "Select a notebook page to preview, or set the active notebook topic with /notebook <topic>",
+		handler: async (args, ctx) => {
+			const topicArg = args.trim();
+			if (topicArg) {
+				const result = setActiveNotebookTopic(state, topicArg, "human");
+				if (ctx.hasUI) {
+					const message = result.boundaryHint
+						? `Active notebook topic changed: ${result.boundaryHint.from} → ${result.boundaryHint.to}. This is a likely task boundary; handoff is recommended before continuing.`
+						: `Active notebook topic: ${result.current}`;
+					ctx.ui.notify(message, result.boundaryHint ? "warning" : "info");
+				}
+				updateIndicators(ctx, state);
+				return;
+			}
 			if (!ctx.hasUI) {
 				return;
 			}
@@ -152,12 +168,25 @@ export default function (pi: ExtensionAPI): void {
 		// Inject context management primer at the end of the system prompt
 		parts.push("\n" + CONTEXT_PRIMER);
 
-		// Inject ledger listing so the LLM always knows what's available
-		const entryNames = Array.from(state.ledger.keys()).sort();
+		if (state.activeNotebookTopic) {
+			parts.push(
+				`\n## Active Notebook Topic\n` +
+				`Current topic: \`${state.activeNotebookTopic}\` (${state.activeNotebookTopicSource ?? "unknown"}-set).\n` +
+				`Treat this as the current semantic frame. If new work fits it, prefer spawn for isolated noisy subtasks. If it does not fit it, prefer handoff over dragging stale context forward.`,
+			);
+		} else {
+			parts.push(
+				`\n## Active Notebook Topic\n` +
+				`No active notebook topic is set. Early in the next substantive task, assign a short stable topic with \`notebook_topic_set\`. Human-set topics are authoritative.`,
+			);
+		}
+
+		// Inject notebook listing so the LLM always knows what's available
+		const entryNames = Array.from(state.notebookPages.keys()).sort();
 		if (entryNames.length > 0) {
 			const listing = entryNames
 				.map((name) => {
-					const content = state.ledger.get(name)!;
+					const content = state.notebookPages.get(name)!;
 					const firstLine = (content.split("\n")[0] ?? "").slice(0, 80);
 					return `  ${name}: ${firstLine}`;
 				})
@@ -201,6 +230,7 @@ export default function (pi: ExtensionAPI): void {
 			// Clear any stale TUI indicators from the previous session
 			if (ctx.hasUI) {
 				ctx.ui.setStatus(STATUS_KEY_HANDOFF, undefined);
+				ctx.ui.setStatus(STATUS_KEY_TOPIC, undefined);
 				ctx.ui.setWidget(WIDGET_KEY_WARNING, undefined);
 			}
 		}

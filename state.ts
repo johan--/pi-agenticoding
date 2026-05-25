@@ -14,6 +14,19 @@ export interface AgenticodingState {
 	/** Monotonically increasing epoch, set on first notebook_write */
 	epoch: number;
 
+	/** Current semantic frame for topic-aware spawn vs handoff decisions. */
+	activeNotebookTopic: string | null;
+
+	/** Whether the current topic came from the human or the agent. */
+	activeNotebookTopicSource: "human" | "agent" | null;
+
+	/** One-shot boundary cue consumed by the next LLM call after a topic change. */
+	pendingTopicBoundaryHint: {
+		from: string | null;
+		to: string;
+		source: "human" | "agent";
+	} | null;
+
 	/** Last context usage percent from getContextUsage() */
 	lastContextPercent: number | null;
 
@@ -59,6 +72,9 @@ export function createState(): AgenticodingState {
 	const state: AgenticodingState = {
 		notebookPages: new Map(),
 		epoch: 0,
+		activeNotebookTopic: null,
+		activeNotebookTopicSource: null,
+		pendingTopicBoundaryHint: null,
 		lastContextPercent: null,
 		pendingHandoff: null,
 		pendingRequestedHandoff: null,
@@ -89,6 +105,9 @@ export function resetState(state: AgenticodingState): void {
 	state.childSessionEpoch++;
 	state.notebookPages.clear();
 	state.epoch = 0;
+	state.activeNotebookTopic = null;
+	state.activeNotebookTopicSource = null;
+	state.pendingTopicBoundaryHint = null;
 	state.lastContextPercent = null;
 	state.pendingHandoff = null;
 	state.pendingRequestedHandoff = null;
