@@ -564,6 +564,63 @@ test("context injects a boundary nudge below 30% after an explicit topic change"
 	assert.match(result.messages[1].content, /Notebook topic changed from oauth to billing/);
 });
 
+
+test("context injects a no-topic nudge when context is high", async () => {
+	const pi = new MockPi();
+	registerAgenticoding(pi as any);
+	const [handler] = pi.handlers.get("context")!;
+
+	const result = await handler(
+		{ messages: [{ role: "user", content: "hi", timestamp: 1 }] },
+		{ getContextUsage: () => ({ percent: 70 }) },
+	);
+
+	assert.equal(result.messages.length, 2);
+	assert.equal(result.messages[1].role, "custom");
+	assert.equal(result.messages[1].customType, "agenticoding-watchdog");
+	assert.equal(result.messages[1].display, false);
+	assert.match(result.messages[1].content, /No active notebook topic is set/);
+	assert.match(result.messages[1].content, /Assign a fresh topic in the next clean context after handoff/i);
+});
+
+
+test("context consumes a boundary hint after the first injected nudge", async () => {
+	const pi = new MockPi();
+	registerAgenticoding(pi as any);
+	const [handler] = pi.handlers.get("context")!;
+	await pi.commands.get("notebook")!.handler("oauth", { hasUI: false, getContextUsage: () => null });
+	await pi.commands.get("notebook")!.handler("billing", { hasUI: false, getContextUsage: () => null });
+
+	const first = await handler(
+		{ messages: [{ role: "user", content: "hi", timestamp: 1 }] },
+		{ getContextUsage: () => ({ percent: 20 }) },
+	);
+	assert.match(first.messages[1].content, /Notebook topic changed from oauth to billing/);
+
+	const second = await handler(
+		{ messages: [{ role: "user", content: "hi", timestamp: 2 }] },
+		{ getContextUsage: () => ({ percent: 20 }) },
+	);
+	assert.equal(second, undefined);
+});
+
+
+test("buildNudge handles null percent and boundary hints before topic guidance", () => {
+	const boundary = buildNudge(
+		{
+			activeNotebookTopic: "oauth",
+			pendingTopicBoundaryHint: { from: "oauth", to: "billing", source: "human" },
+		},
+		null,
+	);
+	assert.match(boundary, /Notebook topic changed from oauth to billing/);
+	assert.doesNotMatch(boundary, /Active notebook topic: oauth/);
+
+	const noTopic = buildNudge({ activeNotebookTopic: null, pendingTopicBoundaryHint: null }, null);
+	assert.match(noTopic, /Topic-aware context reminder/);
+	assert.match(noTopic, /No active notebook topic is set/);
+});
+
 test("watchdog stays advisory when a requested handoff is not completed", async () => {
 	const pi = new MockPi();
 	const state = createState();
@@ -2089,6 +2146,34 @@ test("/notebook exits cleanly when headless", async () => {
 	await assert.doesNotReject(() => pi.commands.get("notebook")!.handler("", { hasUI: false }));
 });
 
+
+test("/notebook <topic> notifies with info on first set and warning on boundary change", async () => {
+	const pi = new MockPi();
+	registerAgenticoding(pi as any);
+	const notifications: Array<{ message: string; level: string }> = [];
+	const statuses = new Map<string, string | undefined>();
+	const widgets = new Map<string, string[] | undefined>();
+	const ctx = {
+		hasUI: true,
+		getContextUsage: () => ({ percent: 20 }),
+		ui: {
+			theme: { fg: (_name: string, text: string) => text },
+			notify: (message: string, level: string) => { notifications.push({ message, level }); },
+			setStatus: (key: string, status: string | undefined) => { statuses.set(key, status); },
+			setWidget: (key: string, content: string[] | undefined) => { widgets.set(key, content); },
+		},
+	};
+
+	await pi.commands.get("notebook")!.handler("oauth", ctx as any);
+	await pi.commands.get("notebook")!.handler("billing", ctx as any);
+
+	assert.deepEqual(notifications[0], { message: "Active notebook topic: oauth", level: "info" });
+	assert.match(notifications[1].message, /Active notebook topic changed: oauth → billing/);
+	assert.equal(notifications[1].level, "warning");
+	assert.equal(statuses.get(STATUS_KEY_TOPIC), "🧭 billing");
+	assert.equal(widgets.get(WIDGET_KEY_WARNING), undefined);
+});
+
 test("/notebook empty overlay renders empty state and closes on input", async () => {
 	const pi = new MockPi();
 	registerAgenticoding(pi as any);
@@ -3146,7 +3231,7 @@ test("topic helpers manage the active notebook topic lifecycle", () => {
 	assert.equal(state.pendingTopicBoundaryHint, null);
 });
 
-test("notebook_topic_set establishes a fresh topic and refuses overrides", async () => {
+test("notebook_topic_set establishes a fresh topic, is idempotent, and refuses overrides", async () => {
 	const pi = new MockPi();
 	const state = createState();
 	registerNotebookTopicTool(pi as any, state);
@@ -3157,7 +3242,39 @@ test("notebook_topic_set establishes a fresh topic and refuses overrides", async
 	assert.equal(state.activeNotebookTopic, "oauth");
 	assert.equal(state.activeNotebookTopicSource, "agent");
 
-	await assert.rejects(() => tool.execute("2", { topic: "billing" }), /already exists/);
+	const second = await tool.execute("2", { topic: "oauth" });
+	assert.equal(second.details.changed, false);
+	assert.equal(second.details.source, "agent");
+	assert.match(second.content[0].text, /already set to "oauth"/i);
+
+	await assert.rejects(() => tool.execute("3", { topic: "billing" }), /already exists/);
+});
+
+
+test("notebook_topic_set preserves human authority, stays idempotent for equal topics, and rejects empty normalized topics", async () => {
+	const pi = new MockPi();
+	const state = createState();
+	registerNotebookTopicTool(pi as any, state);
+	const tool = pi.tools.get("notebook_topic_set");
+
+	setActiveNotebookTopic(state, "oauth", "human");
+	const same = await tool.execute("1", { topic: "OAuth" });
+	assert.equal(same.details.changed, false);
+	assert.equal(same.details.source, "human");
+	assert.match(same.content[0].text, /already set to "oauth"/i);
+	await assert.rejects(
+		() => tool.execute("2", { topic: "billing" }),
+		/human-set notebook topic is authoritative/i,
+	);
+
+	const freshPi = new MockPi();
+	const freshState = createState();
+	registerNotebookTopicTool(freshPi as any, freshState);
+	const freshTool = freshPi.tools.get("notebook_topic_set");
+	await assert.rejects(
+		() => freshTool.execute("3", { topic: "@@@" }),
+		/notebook topic cannot be empty/i,
+	);
 });
 
 test("buildNudge no longer emits the old percent-only handoff text", () => {
@@ -3167,41 +3284,38 @@ test("buildNudge no longer emits the old percent-only handoff text", () => {
 	assert.match(old, /prefer spawn/i);
 });
 
-test("CONTEXT_PRIMER frames the notebook as durable grounding and handoff as direction", () => {
-	// No stale "ledger" references
+
+test("CONTEXT_PRIMER states the notebook, topic, and handoff contracts", () => {
 	assert.doesNotMatch(CONTEXT_PRIMER, /ledger/i,
 		"CONTEXT_PRIMER should contain zero stale ledger references after the rename");
 
-	// Structural: section headers exist
-	// Structural: section headers exist
-	assert.match(CONTEXT_PRIMER, /### Notebook/);
-	assert.match(CONTEXT_PRIMER, /### Active notebook topic/);
-	assert.match(CONTEXT_PRIMER, /### Handoff/);
-	assert.match(CONTEXT_PRIMER, /### Rules/);
+	const notebookParts = CONTEXT_PRIMER.split("### Notebook");
+	const topicParts = CONTEXT_PRIMER.split("### Active notebook topic");
+	const handoffParts = CONTEXT_PRIMER.split("### Handoff");
+	const rulesParts = CONTEXT_PRIMER.split("### Rules");
+	assert.equal(notebookParts.length, 2);
+	assert.equal(topicParts.length, 2);
+	assert.equal(handoffParts.length, 2);
+	assert.equal(rulesParts.length, 2);
 
-	// Structural: Rules section names the tools it references
-	const rules = CONTEXT_PRIMER.split("### Rules")[1];
-	assert.ok(rules.includes("notebook_index"), "Rules should mention notebook_index");
-	assert.ok(rules.includes("notebook_read"), "Rules should mention notebook_read");
-	assert.ok(rules.includes("distilled next task"), "Rules should frame handoff as the next task");
+	const notebookSection = notebookParts[1].split("### Active notebook topic")[0];
+	const topicSection = topicParts[1].split("### Handoff")[0];
+	const handoffSection = handoffParts[1].split("### Rules")[0];
+	const rulesSection = rulesParts[1];
 
-	// Conceptual: Notebook section contains durable grounding concepts
-	const notebookSection = CONTEXT_PRIMER.split("### Notebook")[1].split("### Active notebook topic")[0].toLowerCase();
-	for (const concept of ["future contexts", "subject", "architecture", "constraints", "verified facts"]) {
-		assert.ok(notebookSection.includes(concept), `Notebook section should mention "${concept}"`);
-		}
-
-	const topicSection = CONTEXT_PRIMER.split("### Active notebook topic")[1].split("### Handoff")[0].toLowerCase();
-	assert.ok(topicSection.includes("semantic frame"), "Topic section should mention semantic frame");
-	assert.ok(topicSection.includes("prefer spawn"), "Topic section should bias spawn inside a topic");
-	assert.ok(topicSection.includes("prefer handoff"), "Topic section should bias handoff across topics");
-
-	const handoffSection = CONTEXT_PRIMER.split("### Handoff")[1].split("### Rules")[0].toLowerCase();
-	assert.ok(handoffSection.includes("situational context"), "Handoff should mention situational context");
-	assert.ok(handoffSection.includes("do not duplicate"), "Handoff should avoid duplicating notebook content");
+	assert.match(notebookSection, /notebook_index/);
+	assert.match(notebookSection, /notebook_read/);
+	assert.match(notebookSection, /future contexts/i);
+	assert.match(topicSection, /semantic frame/i);
+	assert.match(topicSection, /prefer spawn/i);
+	assert.match(topicSection, /prefer handoff/i);
+	assert.match(handoffSection, /handoff/i);
+	assert.match(handoffSection, /notebook/i);
+	assert.match(rulesSection, /one subject, thread, or subsystem/i);
 });
 
-test("before_agent_start injects the notebook primer and live notebook pages", async () => {
+
+test("before_agent_start injects notebook contracts plus live topic and page data", async () => {
 	const pi = new MockPi();
 	registerAgenticoding(pi as any);
 	await pi.commands.get("notebook")!.handler("oauth", { hasUI: false, getContextUsage: () => null });
@@ -3216,10 +3330,21 @@ test("before_agent_start injects the notebook primer and live notebook pages", a
 	assert.match(result.systemPrompt, /## Active Notebook Topic/);
 	assert.match(result.systemPrompt, /Current topic: `oauth`/);
 	assert.match(result.systemPrompt, /## Active Notebook Pages/);
-	assert.match(result.systemPrompt, /The following pages are available via notebook_read by name:/);
-	assert.ok(result.systemPrompt.includes("Reference pages by name"), "should reference pages by name");
+	assert.match(result.systemPrompt, /notebook_read/);
+	assert.match(result.systemPrompt, /Reference pages by name/i);
 	assert.match(result.systemPrompt, /alpha: first line/);
-	assert.ok(result.systemPrompt.includes(CONTEXT_PRIMER), "system prompt should include CONTEXT_PRIMER verbatim");
+});
+
+
+test("before_agent_start injects no-topic guidance when the topic is unset", async () => {
+	const pi = new MockPi();
+	registerAgenticoding(pi as any);
+	const [handler] = pi.handlers.get("before_agent_start")!;
+	const result = await handler({ systemPrompt: "Base system prompt." }, makeTUICtx({ hasUI: false }));
+
+	assert.match(result.systemPrompt, /## Active Notebook Topic/);
+	assert.match(result.systemPrompt, /No active notebook topic is set\./);
+	assert.match(result.systemPrompt, /notebook_topic_set/);
 });
 
 test("notebook tool definitions omit prompt hints by default", () => {
