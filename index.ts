@@ -119,7 +119,7 @@ export default function (pi: ExtensionAPI): void {
 		if (event.toolName === "write" || event.toolName === "edit") {
 			return {
 				block: true as const,
-				reason: "Readonly mode: write/edit disabled. Use /readonly to disable.",
+				reason: "Readonly mode: write/edit disabled.",
 			};
 		}
 
@@ -129,7 +129,7 @@ export default function (pi: ExtensionAPI): void {
 				return {
 					block: true as const,
 					reason:
-						"Readonly mode: dangerous command blocked. Use /readonly to disable.\n" +
+						"Readonly mode: dangerous command blocked.\n" +
 						`Command: ${cmd}`,
 				};
 			}
@@ -303,7 +303,7 @@ export default function (pi: ExtensionAPI): void {
 							customType: "agenticoding-readonly-nudge",
 							content:
 								"Readonly mode is active. Do not call write or edit. " +
-								"Destructive bash operations will be blocked. Use /readonly to disable.",
+								"Destructive bash operations will be blocked.",
 							display: false,
 							timestamp: Date.now(),
 						},

@@ -140,7 +140,7 @@ function createReadonlyChildBashTool(cwd: string): ToolDefinition {
 		spawnHook: (spawnContext) => {
 			if (!isSafeReadonlyCommand(spawnContext.command)) {
 				throw new Error(
-					"Readonly mode: dangerous command blocked. Use /readonly to disable.\n" +
+					"Readonly mode: dangerous command blocked.\n" +
 					`Command: ${spawnContext.command}`,
 				);
 			}
