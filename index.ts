@@ -118,10 +118,12 @@ export default function (pi: ExtensionAPI): void {
 	pi.on("tool_call", async (event) => {
 		if (!state.readonlyEnabled) return;
 
-		if (event.toolName === "write" || event.toolName === "edit") {
+		if (event.toolName === "write" || event.toolName === "edit" || event.toolName === "handoff") {
 			return {
 				block: true as const,
-				reason: "Readonly mode: write/edit disabled.",
+				reason:
+					"Readonly mode: write/edit/handoff disabled. " +
+					"Use spawn for same-topic delegation, or disable readonly with /readonly before handoff.",
 			};
 		}
 
