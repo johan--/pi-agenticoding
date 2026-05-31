@@ -38,7 +38,8 @@ import {
 	WIDGET_KEY_WARNING,
 	updateIndicators,
 } from "./tui.js";
-import { isSafeReadonlyCommand } from "./readonly-bash.js";
+import { applyReadonlyBashGuard } from "./readonly-bash.js";
+import { validateConfigEdit, validateConfigWrite } from "./config-validator.js";
 import { formatPagePreview } from "./notebook/store.js";
 
 export default function (pi: ExtensionAPI): void {
@@ -73,14 +74,14 @@ export default function (pi: ExtensionAPI): void {
 		updateIndicators(ctx, state);
 		ctx.ui.notify(
 			state.readonlyEnabled
-				? "Readonly mode enabled \u2014 write/edit/handoff/destructive-bash blocked"
-				: "Readonly mode disabled \u2014 write/edit/handoff/bash unblocked",
+				? "Readonly mode enabled \u2014 write/edit/handoff and non-temp bash writes blocked"
+				: "Readonly mode disabled \u2014 write/edit/handoff and non-temp bash writes unblocked",
 			"info",
 		);
 	}
 
 	pi.registerCommand("readonly", {
-		description: "Toggle readonly mode (blocks write/edit/handoff/destructive-bash)",
+		description: "Toggle readonly mode (blocks write/edit/handoff and bash writes outside the OS temp dir)",
 		handler: async (_args, ctx) => toggleReadonly(ctx),
 	});
 
@@ -114,34 +115,54 @@ export default function (pi: ExtensionAPI): void {
 				state.readonlyEnabled = true;
 			}
 		}
-		// Nudge if readonly was activated by rehydration (CLI flag, branch restore, or undo)
-		if (state.readonlyEnabled && !wasEnabled) {
+		// Nudge on any rehydrated readonly authority change.
+		if (state.readonlyEnabled !== wasEnabled) {
 			state.readonlyNudgePending = true;
 		}
 	}
 
 	// ── Readonly: tool_call blocking ────────────────────────────────
-	pi.on("tool_call", async (event) => {
+	pi.on("tool_call", async (event, ctx) => {
+		// ── Config validation (always, even when readonly is OFF) ──
+		if (event.toolName === "write" || event.toolName === "edit") {
+			const input = event.input as Record<string, unknown>;
+			const filePath = input.path as string;
+			if (filePath) {
+				const validation = event.toolName === "write"
+					? validateConfigWrite(filePath, (input.content as string) ?? "")
+					: validateConfigEdit(filePath);
+				if (!validation.allow) {
+					console.debug(`[readonly] Config validation blocked ${event.toolName}: ${validation.reason}`);
+					return { block: true as const, reason: validation.reason };
+				}
+			}
+		}
+
+		// ── Readonly mode ───────────────────────────────────────────
 		if (!state.readonlyEnabled) return;
 
 		if (event.toolName === "write" || event.toolName === "edit" || event.toolName === "handoff") {
+			console.debug(`[readonly] Blocked ${event.toolName} — readonly mode active`);
 			return {
 				block: true as const,
 				reason:
 					"Readonly mode: write/edit/handoff disabled. " +
-					"Use spawn for same-topic delegation, or disable readonly with /readonly before handoff.",
+					"Toggle with /readonly. Use spawn for same-topic delegation.",
 			};
 		}
 
 		if (event.toolName === "bash") {
-			const cmd = (event.input as Record<string, unknown>).command as string;
-			if (!isSafeReadonlyCommand(cmd)) {
-				return {
-					block: true as const,
-					reason:
-						"Readonly mode: dangerous command blocked.\n" +
-						`Command: ${cmd}`,
-				};
+			const input = event.input as Record<string, string>;
+			const cmd = input.command as string;
+
+			const result = applyReadonlyBashGuard(cmd, ctx.cwd);
+			if (result.action === "block") {
+				return { block: true as const, reason: result.reason };
+			}
+			if (result.action === "sandbox") {
+				// Mutate input.command in-place — SDK has no transform return type.
+				// Other tool_call hooks will see the sandbox-wrapped command.
+				input.command = result.sandboxedCommand;
 			}
 		}
 	});
@@ -303,58 +324,48 @@ export default function (pi: ExtensionAPI): void {
 			state.lastContextPercent = usage.percent;
 		}
 
-		// Readonly ON/OFF nudge (one-shot, merged into the same context hook)
+		// Build the readonly nudge message (if pending) — don't early-return so
+		// it can merge with the watchdog nudge when both are needed in the same turn.
+		let readonlyNudgeMsg: { role: string; customType: string; content: string; display: boolean; timestamp: number } | null = null;
 		if (state.readonlyNudgePending) {
 			state.readonlyNudgePending = false;
-
-			if (state.readonlyEnabled) {
-				// ON nudge
-				return {
-					messages: [
-						...event.messages,
-						{
-							role: "custom" as const,
-							customType: "agenticoding-readonly-nudge",
-							content:
-								"Readonly mode is active. write, edit, handoff, and destructive " +
-								"bash operations are blocked. Allowed: read, notebook, safe bash, spawn for same-topic delegation. Disable readonly with /readonly before handoff.",
-							display: false,
-							timestamp: Date.now(),
-						},
-					],
-				};
-			} else {
-				const branch = ctx.sessionManager?.getBranch?.() ?? [];
-				const hasPriorOn = pi.getFlag("readonly") === true || branch.some(
-					(e) =>
-						(e as Record<string, unknown>).customType === "agenticoding-readonly" &&
-						((e as Record<string, unknown>).data as Record<string, unknown>)?.enabled === true,
-				);
-				if (hasPriorOn) {
-					return {
-						messages: [
-							...event.messages,
-							{
-								role: "custom" as const,
-								customType: "agenticoding-readonly-nudge",
-								content:
-									"Readonly mode has been turned off. You may now use write, edit, handoff, and bash freely." +
-									(percent !== null && percent >= 30
-										? " Context was at " + Math.round(percent) + "% — if the work changed topics, you can handoff now."
-										: ""),
-								display: false,
-								timestamp: Date.now(),
-							},
-						],
-					};
-				}
-			}
+			readonlyNudgeMsg = {
+				role: "custom" as const,
+				customType: "agenticoding-readonly-nudge",
+				content: state.readonlyEnabled
+					? "Readonly mode is active. write, edit, handoff, and bash filesystem writes/deletions outside the OS temp dir are blocked. " +
+					  "Allowed: read, notebook, env inheritance, and non-mutating bash."
+					: "Readonly mode has been turned off. You may now use write, edit, handoff, and bash freely." +
+					  (percent !== null && percent >= 30
+						? " Context was at " + Math.round(percent) + "% — if the work changed topics, you can handoff now."
+						: ""),
+				display: false,
+				timestamp: Date.now(),
+			};
 		}
 
 		// Below primacy-zone threshold (~30%), skip watchdog unless a boundary
 		// hint is pending — context is still fresh enough that nudges add noise.
 		if (!state.pendingTopicBoundaryHint && (percent === null || percent < 30)) {
+			state.lastWatchdogBand = null;
+			if (readonlyNudgeMsg) {
+				return { messages: [...event.messages, readonlyNudgeMsg] };
+			}
 			return;
+		}
+
+		// Throttle: only nudge when crossing into a higher context-percentage band.
+		// Bands: null (<30), 0 (30-49), 1 (50-69), 2 (70+). This prevents nudging
+		// every turn once past 30%.
+		if (!state.pendingTopicBoundaryHint) {
+			const band = percent! < 50 ? 0 : percent! < 70 ? 1 : 2;
+			if (state.lastWatchdogBand !== null && band <= state.lastWatchdogBand) {
+				if (readonlyNudgeMsg) {
+					return { messages: [...event.messages, readonlyNudgeMsg] };
+				}
+				return;
+			}
+			state.lastWatchdogBand = band;
 		}
 
 		const nudge = buildNudge(state, percent);
@@ -362,6 +373,7 @@ export default function (pi: ExtensionAPI): void {
 		return {
 			messages: [
 				...event.messages,
+				...(readonlyNudgeMsg ? [readonlyNudgeMsg] : []),
 				{
 					role: "custom",
 					customType: "agenticoding-watchdog",
