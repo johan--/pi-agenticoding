@@ -158,7 +158,24 @@ function generateDelimiter(): string {
 export function wrapWithSandboxExec(command: string): string {
 	const profile = buildMacProfile(getCanonicalTempDir());
 	const delim = generateDelimiter();
-	return `sandbox-exec -p '${profile}' /bin/bash << '${delim}'\n${command}\n${delim}`;
+	return `sandbox-exec -p '${profile}' /bin/bash << '${delim}'
+output=\$({
+${command}
+} 2>&1)
+rc=\$?
+if [ \$rc -ne 0 ]; then
+  case "\$output" in
+    *"Operation not permitted"*|*"Permission denied"*|*"denying file-write"*)
+      echo ""
+      echo "[readonly mode] The OS sandbox blocked a filesystem write outside the OS temp dir."
+      echo "Use /readonly to disable, or write within the OS temp dir."
+      echo ""
+      ;;
+  esac
+fi
+[ -n "\$output" ] && echo "\$output"
+exit \$rc
+${delim}`;
 }
 
 // ── Linux: bubblewrap ────────────────────────────────────────────
@@ -189,7 +206,24 @@ export function wrapWithBwrap(command: string): string {
 		"--die-with-parent",
 		"--new-session",
 	];
-	return `bwrap ${flags.join(" ")} /bin/sh << '${delim}'\n${command}\n${delim}`;
+	return `bwrap ${flags.join(" ")} /bin/sh << '${delim}'
+output=\$({
+${command}
+} 2>&1)
+rc=\$?
+if [ \$rc -ne 0 ]; then
+  case "\$output" in
+    *"Operation not permitted"*|*"Permission denied"*|*"denying file-write"*)
+      echo ""
+      echo "[readonly mode] The OS sandbox blocked a filesystem write outside the OS temp dir."
+      echo "Use /readonly to disable, or write within the OS temp dir."
+      echo ""
+      ;;
+  esac
+fi
+[ -n "\$output" ] && echo "\$output"
+exit \$rc
+${delim}`;
 }
 
 // ── Unified dispatch ─────────────────────────────────────────────
