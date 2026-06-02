@@ -13,7 +13,7 @@
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { DynamicBorder } from "@earendil-works/pi-coding-agent";
+import { DynamicBorder, isToolCallEventType } from "@earendil-works/pi-coding-agent";
 import {
 	Container,
 	type SelectItem,
@@ -144,18 +144,18 @@ export default function (pi: ExtensionAPI): void {
 			};
 		}
 
-		if (event.toolName === "bash") {
-			const input = event.input as Record<string, string>;
-			const cmd = input.command as string;
+		if (isToolCallEventType("bash", event)) {
+			const cmd = event.input.command;
 
 			const result = applyReadonlyBashGuard(cmd, ctx.cwd);
 			if (result.action === "block") {
+				console.debug("[readonly] Blocked bash — %s", result.reason);
 				return { block: true as const, reason: result.reason };
 			}
 			if (result.action === "sandbox") {
 				// Mutate input.command in-place — SDK has no transform return type.
 				// Other tool_call hooks will see the sandbox-wrapped command.
-				input.command = result.sandboxedCommand;
+				event.input.command = result.sandboxedCommand;
 			}
 		}
 	});

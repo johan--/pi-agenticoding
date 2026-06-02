@@ -4004,10 +4004,6 @@ test("readonly tool_call blocks non-temp bash writes when readonly is on", async
 	assert.equal(safeResult, undefined);
 });
 
-	assert.equal(result.block, true);
-	assert.match(result.reason, /invalid JSON/);
-});
-
 // ── Readonly mode: spawn child filtering ───────────────────────────
 
 test("spawn filters write and edit from child tools when readonly is on", async () => {
