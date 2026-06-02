@@ -39,7 +39,6 @@ import {
 	updateIndicators,
 } from "./tui.js";
 import { applyReadonlyBashGuard } from "./readonly-bash.js";
-import { validateConfigEdit, validateConfigWrite } from "./config-validator.js";
 import { formatPagePreview } from "./notebook/store.js";
 
 export default function (pi: ExtensionAPI): void {
@@ -123,22 +122,14 @@ export default function (pi: ExtensionAPI): void {
 
 	// ── Readonly: tool_call blocking ────────────────────────────────
 	pi.on("tool_call", async (event, ctx) => {
-		// ── Config validation (always, even when readonly is OFF) ──
-		if (event.toolName === "write" || event.toolName === "edit") {
-			const input = event.input as Record<string, unknown>;
-			const filePath = input.path as string;
-			if (filePath) {
-				const validation = event.toolName === "write"
-					? validateConfigWrite(filePath, (input.content as string) ?? "")
-					: validateConfigEdit(filePath);
-				if (!validation.allow) {
-					console.debug(`[readonly] Config validation blocked ${event.toolName}: ${validation.reason}`);
-					return { block: true as const, reason: validation.reason };
-				}
-			}
-		}
-
 		// ── Readonly mode ───────────────────────────────────────────
+		// Guardrail for a coding agent (not a security boundary):
+		// write/edit/handoff stay in the tool list but are blocked at
+		// call time with { block: true }. Keeping them advertised
+		// avoids context-cache invalidation from tools disappearing
+		// mid-session.  Children use the opposite approach (remove
+		// from tool list entirely) because they start with a fresh
+		// context — see spawn/index.ts.
 		if (!state.readonlyEnabled) return;
 
 		if (event.toolName === "write" || event.toolName === "edit" || event.toolName === "handoff") {

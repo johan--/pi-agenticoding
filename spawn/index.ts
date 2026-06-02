@@ -9,8 +9,6 @@
  * extensions of the parent and inherit parent authority by design.
  */
 
-import fs from "node:fs/promises";
-import path from "node:path";
 import type {
 	ExtensionAPI,
 	ExtensionContext,
@@ -30,7 +28,6 @@ import type { AgenticodingState } from "../state.js";
 import { formatPageList } from "../notebook/store.js";
 import { createNotebookToolDefinitions } from "../notebook/tools.js";
 import { applyReadonlyBashGuard } from "../readonly-bash.js";
-import { validateConfigEdit, validateConfigWrite } from "../config-validator.js";
 import {
 	renderSpawnCall,
 	renderSpawnResult,
@@ -175,110 +172,7 @@ function createReadonlyChildBashTool(
 	return bashTool;
 }
 
-function resolveChildPath(cwd: string, filePath: string): string {
-	return path.isAbsolute(filePath) ? filePath : path.resolve(cwd, filePath);
-}
 
-/**
- * Create a write tool definition for non-readonly child sessions with config validation.
- *
- * Runs validateConfigWrite before writing to protect known IDE/tool config files
- * (.vscode/settings.json, .cursorrules, .mcp.json, etc.). Non-protected paths are
- * written normally. Relative paths are resolved against the child's cwd.
- */
-function createConfigValidatedChildWriteTool(cwd: string): ToolDefinition {
-	return {
-		name: "write",
-		description: "Create or overwrite a file after config validation.",
-		parameters: Type.Object({
-			path: Type.String({ description: "Path to the file to write" }),
-			content: Type.String({ description: "Content to write" }),
-		}),
-		async execute(_toolCallId, params) {
-			const validation = validateConfigWrite(params.path, params.content);
-			if (!validation.allow) throw new Error(validation.reason);
-			const filePath = resolveChildPath(cwd, params.path);
-			await fs.mkdir(path.dirname(filePath), { recursive: true });
-			await fs.writeFile(filePath, params.content, "utf8");
-			return {
-				content: [{ type: "text", text: `Wrote ${params.path}` }],
-			};
-		},
-	};
-}
-
-/**
- * Apply multiple disjoint edits to a string in reverse order (bottom-to-top).
- *
- * Validates: oldText non-empty, unique in original, ranges non-overlapping.
- * This is an internal helper for the child edit tool — not a copy of SDK internals.
- */
-export function applyChildEdits(
-	original: string,
-	edits: Array<{ oldText: string; newText: string }>,
-): string {
-	const ranges = edits.map((edit) => {
-		if (edit.oldText.length === 0) {
-			throw new Error("Edit failed: oldText must not be empty.");
-		}
-		const start = original.indexOf(edit.oldText);
-		if (start === -1) {
-			throw new Error(`Edit failed: oldText not found: ${edit.oldText}`);
-		}
-		if (original.indexOf(edit.oldText, start + 1) !== -1) {
-			throw new Error(`Edit failed: oldText must match a unique region: ${edit.oldText}`);
-		}
-		return { start, end: start + edit.oldText.length, ...edit };
-	}).sort((a, b) => a.start - b.start);
-
-	for (let i = 1; i < ranges.length; i++) {
-		if (ranges[i - 1].end > ranges[i].start) {
-			throw new Error("Edit failed: edit ranges overlap.");
-		}
-	}
-
-	let next = original;
-	for (let i = ranges.length - 1; i >= 0; i--) {
-		const range = ranges[i];
-		next = next.slice(0, range.start) + range.newText + next.slice(range.end);
-	}
-	return next;
-}
-
-/**
- * Create an edit tool definition for non-readonly child sessions with config validation.
- *
- * Blocks edit operations on protected config file paths — the agent must use write
- * for full-content validation. Non-protected files are edited normally. Uses
- * applyChildEdits for bottom-to-top hunk application with overlap/uniqueness validation.
- */
-function createConfigValidatedChildEditTool(cwd: string): ToolDefinition {
-	// Custom edit tool so config validation runs before edits.
-	// Non-protected files are edited normally; protected config paths
-	// are blocked so the agent must rewrite with write (full-content validation).
-	return {
-		name: "edit",
-		description: "Edit a file via exact text replacement after config validation.",
-		parameters: Type.Object({
-			path: Type.String({ description: "Path to the file to edit" }),
-			edits: Type.Array(Type.Object({
-				oldText: Type.String({ description: "Exact text to replace" }),
-				newText: Type.String({ description: "Replacement text" }),
-			})),
-		}),
-		async execute(_toolCallId, params) {
-			const validation = validateConfigEdit(params.path);
-			if (!validation.allow) throw new Error(validation.reason);
-			const filePath = resolveChildPath(cwd, params.path);
-			const original = await fs.readFile(filePath, "utf8");
-			const next = applyChildEdits(original, params.edits);
-			await fs.writeFile(filePath, next, "utf8");
-			return {
-				content: [{ type: "text", text: `Edited ${params.path}` }],
-			};
-		},
-	};
-}
 
 // ── Spawn tool metadata ──
 
@@ -373,7 +267,7 @@ export async function executeSpawn(
 		? "Available notebook pages:\n" + listing
 		: "No notebook pages.";
 	const readonlyNotice = state.readonlyEnabled
-		? "\n\nReadonly restrictions apply. Do not attempt filesystem writes or deletions outside the OS temp dir. Environment inheritance is allowed. IDE config poisoning prevention (config-validator) always applies regardless of readonly mode."
+		? "\n\nReadonly restrictions apply. Do not attempt filesystem writes or deletions outside the OS temp dir. Environment inheritance is allowed."
 		: "";
 	const authorityNote = state.readonlyEnabled
 		? "You inherit readonly authority in this session."
@@ -397,22 +291,25 @@ export async function executeSpawn(
 	const childTools = createChildTools(pi, state, { isStale });
 	const parentToolNames = pi.getActiveTools();
 	const childToolNames = buildChildToolNames(parentToolNames, childTools, pi.getAllTools());
+	// Children: readonly vs non-readonly tool strategy differs from the parent.
+	// Parent keeps write/edit in the tool list and blocks at call time to avoid
+	// context-cache misses (index.ts). Children start with a fresh context — no
+	// cache to preserve — so we remove write/edit from the tool list entirely
+	// (cleaner than advertising tools that always error).  The readonly bash guard
+	// (sandbox-exec/bwrap or classifyBashCommand fallback) still propagates to
+	// children via createReadonlyChildBashTool below.
+	//
+	// This is a guardrail for a coding agent, not a security boundary.
 	const effectiveChildTools = [
 		...childTools,
-		// Config-validated write/edit tools are only added when readonly is OFF.
-		// When readonly is ON, write/edit are removed from effectiveToolNames below,
-		// so adding them here would be inaccessible — safety guard to avoid
-		// latent risk if tool name filtering changes.
-		...(!state.readonlyEnabled && childToolNames.includes("write") ? [createConfigValidatedChildWriteTool(ctx.cwd)] : []),
-		...(!state.readonlyEnabled && childToolNames.includes("edit") ? [createConfigValidatedChildEditTool(ctx.cwd)] : []),
 		...(state.readonlyEnabled && childToolNames.includes("bash")
 			? [createReadonlyChildBashTool(ctx.cwd)]
 			: []),
 	];
 
-	// Readonly: remove write/edit and mirror the parent's bash write/delete guard.
-	// Custom tools (readonly bash, config-validated write/edit) override built-in
-	// tools with the same name via the SDK's session factory — no name exclusion needed.
+	// Readonly: remove write/edit from child tool list entirely (fresh context,
+	// no cache to invalidate). The readonly bash guard overrides the built-in
+	// bash tool — no name exclusion needed.
 	const effectiveToolNames = state.readonlyEnabled
 		? childToolNames.filter((name) => name !== "write" && name !== "edit")
 		: childToolNames;
