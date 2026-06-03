@@ -63,14 +63,37 @@ function hasCommand(command: string): boolean {
 
 function _hasBwrap(): boolean {
 	if (_bwrapResult === undefined) {
-		_bwrapResult = hasCommand("bwrap");
+		if (hasCommand("bwrap")) {
+			// Quick functional test: can bwrap actually create a namespace?
+			try {
+				execSync("bwrap --ro-bind / / true 2>/dev/null", { stdio: "ignore", timeout: 2000 });
+				_bwrapResult = true;
+			} catch (e) {
+				_bwrapResult = false;
+				process.stderr.write(`[readonly] bwrap found but functional probe failed — falling back to pattern classification. ${String(e?.constructor?.name ?? e)}\n`);
+			}
+		} else {
+			_bwrapResult = false;
+		}
 	}
 	return _bwrapResult;
 }
 
 function _hasSandboxExec(): boolean {
 	if (_sandboxExecResult === undefined) {
-		_sandboxExecResult = hasCommand("sandbox-exec");
+		if (hasCommand("sandbox-exec")) {
+			// Quick functional test: can sandbox-exec actually enforce a profile?
+			try {
+				execSync("echo true | sandbox-exec -p '(version 1)(allow default)' /bin/bash 2>/dev/null",
+					{ stdio: "ignore", timeout: 2000 });
+				_sandboxExecResult = true;
+			} catch (e) {
+				_sandboxExecResult = false;
+				process.stderr.write(`[readonly] sandbox-exec found but functional probe failed — falling back to pattern classification. ${String(e?.constructor?.name ?? e)}\n`);
+			}
+		} else {
+			_sandboxExecResult = false;
+		}
 	}
 	return _sandboxExecResult;
 }
