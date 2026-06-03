@@ -3969,6 +3969,45 @@ test("readonly tool_call blocks non-temp bash writes when readonly is on", async
 	assert.equal(blankResult, undefined);
 });
 
+test("readonly tool_call blocks malformed bash input", async () => {
+	const pi = new MockPi();
+	registerAgenticoding(pi as any);
+
+	const [toolCallHandler] = pi.handlers.get("tool_call")!;
+	const notifications: string[] = [];
+	const statuses = new Map<string, string | undefined>();
+
+	// Toggle readonly ON via command
+	await pi.commands.get("readonly")!.handler("", {
+		hasUI: true,
+		ui: {
+			notify: (msg: string) => notifications.push(msg),
+			theme: { fg: (_n: string, t: string) => t },
+			setStatus: (key: string, val: string | undefined) => statuses.set(key, val),
+			setWidget: () => {},
+		},
+		getContextUsage: () => null,
+	});
+
+	// Missing command property
+	const missingCmd = await toolCallHandler({ toolName: "bash", input: {} }, { cwd: "/workspace" });
+	assert.ok(missingCmd, "should block bash with missing command");
+	assert.equal(missingCmd.block, true);
+	assert.match(missingCmd.reason, /invalid bash command input/);
+
+	// Non-string command input
+	const numCmd = await toolCallHandler({ toolName: "bash", input: { command: 42 } }, { cwd: "/workspace" });
+	assert.ok(numCmd, "should block bash with non-string command");
+	assert.equal(numCmd.block, true);
+	assert.match(numCmd.reason, /invalid bash command input/);
+
+	// Null command
+	const nullCmd = await toolCallHandler({ toolName: "bash", input: { command: null } }, { cwd: "/workspace" });
+	assert.ok(nullCmd, "should block bash with null command");
+	assert.equal(nullCmd.block, true);
+	assert.match(nullCmd.reason, /invalid bash command input/);
+});
+
 // ── Readonly mode: spawn child filtering ───────────────────────────
 
 test("spawn filters write and edit from child tools when readonly is on", async () => {
