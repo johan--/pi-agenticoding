@@ -3831,6 +3831,33 @@ test("readonly toggle command enables and disables readonly mode", () => {
 	assert.equal(statuses.get("agenticoding-readonly"), undefined);
 });
 
+test("readonly toggle is a no-op in headless mode", async () => {
+	const pi = new MockPi();
+	registerAgenticoding(pi as any);
+
+	const state = createState();
+	const ctx = {
+		hasUI: false,
+		ui: {
+			notify: () => { throw new Error("should not be called in headless"); },
+			theme: { fg: (_n: string, t: string) => t },
+			setStatus: () => { throw new Error("should not be called in headless"); },
+			setWidget: () => { throw new Error("should not be called in headless"); },
+		},
+		getContextUsage: () => null,
+	};
+
+	// Toggle in headless mode should not crash and should not change state
+	pi.commands.get("readonly")!.handler("", ctx);
+	// Verify readonly was NOT enabled — write should not be blocked
+	const [toolCallHandler] = pi.handlers.get("tool_call")!;
+	const result = await toolCallHandler(
+		{ toolName: "write", input: { path: "/tmp/test", content: "" } },
+		{ cwd: "/workspace" },
+	);
+	assert.equal(result, undefined, "write is not blocked after headless readonly toggle");
+});
+
 test("readonly TUI indicator shows warning tone when enabled", () => {
 	const state = createState();
 	state.readonlyEnabled = true;

@@ -67,18 +67,17 @@ export default function (pi: ExtensionAPI): void {
 	});
 
 	function toggleReadonly(ctx: ExtensionContext): void {
+		if (!ctx.hasUI) return; // Toggle is a UI-only command, no-op in headless.
 		state.readonlyEnabled = !state.readonlyEnabled;
 		state.readonlyNudgePending = true;
 		pi.appendEntry("agenticoding-readonly", { enabled: state.readonlyEnabled });
 		updateIndicators(ctx, state);
-		if (ctx.hasUI) {
-			ctx.ui.notify(
-				state.readonlyEnabled
-					? "Readonly mode enabled \u2014 write/edit/handoff and non-temp bash writes blocked"
-					: "Readonly mode disabled \u2014 write/edit/handoff and non-temp bash writes unblocked",
-				"info",
-			);
-		}
+		ctx.ui.notify(
+			state.readonlyEnabled
+				? "Readonly mode enabled \u2014 write/edit/handoff and non-temp bash writes blocked"
+				: "Readonly mode disabled \u2014 write/edit/handoff and non-temp bash writes unblocked",
+			"info",
+		);
 	}
 
 	pi.registerCommand("readonly", {
