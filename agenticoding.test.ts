@@ -4857,6 +4857,24 @@ test("classifyBashCommand handles empty and bare commands", () => {
 	assert.equal(isBlocked("git"), true, "bare git without subcommand should be blocked");
 });
 
+test("classifyBashCommand allows npm run build inside temp", () => {
+	// H1 fix: 'build' removed from package mutation regex. 'npm run build' is not
+	// a package installation — it runs a build script. Package installations are
+	// still caught by install/uninstall/add/remove/etc.
+	const tmp = os.tmpdir();
+	assert.equal(isDirect(`cd ${tmp} && npm run build`), true, "npm run build inside temp");
+	// npm run build outside temp should also be allowed (not a package mutation)
+	assert.equal(isDirect("npm run build"), true, "npm run build allowed anywhere");
+	assert.equal(isDirect(`cd ${tmp} && yarn build`), true, "yarn build inside temp");
+	assert.equal(isDirect(`cd ${tmp} && npm build`), true, "npm build (old-style) inside temp");
+	// Actual package mutations should still be blocked
+	assert.equal(isBlocked("npm install lodash"), true, "npm install still blocked");
+	assert.equal(isBlocked("pip install requests"), true, "pip install still blocked");
+	// apt build-dep is a package mutation (not a script build)
+	assert.equal(isBlocked("apt build-dep nginx"), true, "apt build-dep still blocked");
+	assert.equal(isBlocked("dnf build-dep nginx"), true, "dnf build-dep still blocked");
+});
+
 // ── classifyBashCommand: exact-string contract tests ─────────────────
 
 test("classifyBashCommand exact reason: git mutable block", () => {

@@ -409,8 +409,11 @@ function getFindMutationTargets(args: string[]): string[] | null {
 }
 
 function isPackageMutation(args: string[]): boolean {
-	const joined = args.join(" ").toLowerCase();
-	return /(install|uninstall|update|upgrade|ci|link|publish|add|remove|reinstall|tap|untap|download|build)/.test(joined);
+	// Match individual tokens against known package-mutation verbs.
+	// Token-level matching (vs. substring-on-joined-string) avoids false
+	// positives when a path or argument contains a verb word (install-sh, etc.).
+	const VERBS = new Set(["install", "uninstall", "update", "upgrade", "ci", "link", "publish", "add", "remove", "reinstall", "tap", "untap", "download", "build-dep"]);
+	return args.some((a) => VERBS.has(a.toLowerCase()));
 }
 
 function findSudoCommandIndex(tokens: string[]): number {
