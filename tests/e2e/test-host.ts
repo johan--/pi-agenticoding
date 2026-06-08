@@ -112,13 +112,13 @@ for await (const line of rl) {
 		}
 		let params;
 		try { params = JSON.parse(jsonArgs); }
-		catch (e) {
-			process.stdout.write("ERR:invalid json: " + e.message + "\n");
+		catch (e: unknown) {
+			process.stdout.write("ERR:invalid json: " + (e instanceof Error ? e.message : String(e)) + "\n");
 			continue;
 		}
 		try {
 			const result = await toolDef.execute("e2e-" + toolName, params, undefined, undefined, mockCtx);
-			const text = result.content?.map(c => c.text).filter(Boolean).join("\n") || "";
+			const text = result.content?.map((c: any) => c.text).filter(Boolean).join("\n") || "";
 			process.stdout.write("OK:" + text + "\n");
 		} catch (e) {
 			const msg = e instanceof Error ? e.message : String(e);

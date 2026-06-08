@@ -266,7 +266,7 @@ test("Property 5: Epoch monotonicity — non-zero after savePage", async () => {
 				assert.equal(state.epoch, 0, "epoch must be 0 on fresh state");
 
 				for (const action of actions) {
-					const prevEpoch = state.epoch;
+					const prevEpoch: number = state.epoch;
 					await apply(state, action);
 
 					if (action.type === "savePage") {
