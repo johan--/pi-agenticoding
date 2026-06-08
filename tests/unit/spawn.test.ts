@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Text } from "@earendil-works/pi-tui";
 import { AuthStorage, ModelRegistry } from "@earendil-works/pi-coding-agent";
 import { createState, resetState } from "../../state.js";
 import {
@@ -1143,7 +1144,7 @@ test("nested spawn invalidate rebuilds from the attached session transcript", ()
 	const firstRender = component.render(120);
 	assert.ok(firstRender.some((l: string) => l.includes("before")));
 
-	session.messages[0].content[0].text = "after";
+	(session.messages[0] as any).content[0].text = "after";
 	component.invalidate();
 
 	const secondRender = component.render(120);
@@ -1393,7 +1394,7 @@ test("nested spawn ignores child renderer invalidations during parent rebuild", 
 	(session as any).getToolDefinition = (toolName: string) => toolName === "reentrant"
 		? {
 			name: "reentrant",
-			renderCall(_args: any, _theme: Theme, context: any) {
+			renderCall(_args: any, _theme: any, context: any) {
 				if (!context.state.didInvalidate) {
 					context.state.didInvalidate = true;
 					context.invalidate();
@@ -1937,6 +1938,7 @@ test("executeSpawn detects stale session before session creation", async () => {
 					abort: async () => { abortCalls++; },
 					getSessionStats: () => undefined,
 				} as any,
+				extensionsResult: undefined as any,
 			};
 		},
 	);
@@ -1976,6 +1978,7 @@ test("executeSpawn aborts stale child when resetState fires during prompt", asyn
 		undefined,
 		"medium",
 		async () => ({
+			extensionsResult: undefined as any,
 			session: {
 				messages: [] as any[],
 				prompt: async () => {
