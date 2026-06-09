@@ -44,6 +44,11 @@ export interface TestHarness {
 /**
  * Create a fresh test harness.  Every test that needs isolation calls this.
  *
+ * IMPORTANT: Do not call createTestHarness() twice without an intervening
+ * teardown(). The second call captures the first's state, and teardown of the
+ * second restores stale singletons. Use beforeEach/afterEach to guarantee a
+ * single active harness per test.
+ *
  * CRITICAL: ESM static imports resolve before any module body runs. This means
  * spawn/renderer.ts registers the production frame scheduler at import time,
  * and createTestHarness() (called in beforeEach) always wins because tests
