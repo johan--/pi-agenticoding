@@ -16,6 +16,7 @@ import {
 	clearActiveNotebookTopic,
 } from "../../notebook/topic.js";
 import { saveNotebookPage } from "../../notebook/store.js";
+import { createTestHarness } from "../test-utils.js";
 
 // ── Mock ExtensionAPI ─────────────────────────────────────────────────
 
@@ -113,219 +114,247 @@ function assertResetClears(state: AgenticodingState): void {
 // ── Properties ────────────────────────────────────────────────────────
 
 test("Property 1: Topic-source coupling invariant", async () => {
-	await fc.assert(
-		fc.asyncProperty(
-			fc.array(
-				fc.oneof(
-					fc.constant({ type: "reset" } as StateAction),
-					fc.record({ type: fc.constant("setTopic"), name: arbTopicName }),
-					fc.constant({ type: "clearTopic" } as StateAction),
-					fc.record({ type: fc.constant("savePage"), name: arbPageName }),
+	const h = createTestHarness();
+	try {
+		await fc.assert(
+			fc.asyncProperty(
+				fc.array(
+					fc.oneof(
+						fc.constant({ type: "reset" } as StateAction),
+						fc.record({ type: fc.constant("setTopic"), name: arbTopicName }),
+						fc.constant({ type: "clearTopic" } as StateAction),
+						fc.record({ type: fc.constant("savePage"), name: arbPageName }),
+					),
+					{ maxLength: 30 },
 				),
-				{ maxLength: 30 },
+				async (actions) => {
+					const state = createState();
+					for (const action of actions) {
+						await apply(state, action);
+						assertTopicSourceCoupling(state);
+					}
+				},
 			),
-			async (actions) => {
-				const state = createState();
-				for (const action of actions) {
-					await apply(state, action);
-					assertTopicSourceCoupling(state);
-				}
-			},
-		),
-		{ numRuns: 100 },
-	);
+			{ numRuns: 100 },
+		);
+	} finally {
+		h.teardown();
+	}
 });
 
 test("Property 2: Child session containment invariant", async () => {
-	await fc.assert(
-		fc.asyncProperty(
-			fc.array(
-				fc.oneof(
-					fc.constant({ type: "reset" } as StateAction),
-					fc.record({ type: fc.constant("addChildSession"), id: arbSessionId }),
-					fc.constant({ type: "abortChildren" } as StateAction),
+	const h = createTestHarness();
+	try {
+		await fc.assert(
+			fc.asyncProperty(
+				fc.array(
+					fc.oneof(
+						fc.constant({ type: "reset" } as StateAction),
+						fc.record({ type: fc.constant("addChildSession"), id: arbSessionId }),
+						fc.constant({ type: "abortChildren" } as StateAction),
+					),
+					{ maxLength: 30 },
 				),
-				{ maxLength: 30 },
+				async (actions) => {
+					const state = createState();
+					for (const action of actions) {
+						await apply(state, action);
+						assertChildSessionContainment(state);
+					}
+				},
 			),
-			async (actions) => {
-				const state = createState();
-				for (const action of actions) {
-					await apply(state, action);
-					assertChildSessionContainment(state);
-				}
-			},
-		),
-		{ numRuns: 100 },
-	);
+			{ numRuns: 100 },
+		);
+	} finally {
+		h.teardown();
+	}
 });
 
 test("Property 3: childSessionEpoch only changes on reset", async () => {
-	await fc.assert(
-		fc.asyncProperty(
-			fc.array(
-				fc.oneof(
-					fc.constant({ type: "reset" } as StateAction),
-					fc.record({ type: fc.constant("setTopic"), name: arbTopicName }),
-					fc.constant({ type: "clearTopic" } as StateAction),
-					fc.record({ type: fc.constant("savePage"), name: arbPageName }),
-					fc.constant({ type: "abortChildren" } as StateAction),
+	const h = createTestHarness();
+	try {
+		await fc.assert(
+			fc.asyncProperty(
+				fc.array(
+					fc.oneof(
+						fc.constant({ type: "reset" } as StateAction),
+						fc.record({ type: fc.constant("setTopic"), name: arbTopicName }),
+						fc.constant({ type: "clearTopic" } as StateAction),
+						fc.record({ type: fc.constant("savePage"), name: arbPageName }),
+						fc.constant({ type: "abortChildren" } as StateAction),
+					),
+					{ maxLength: 30 },
 				),
-				{ maxLength: 30 },
-			),
-			async (actions) => {
-				const state = createState();
-				let expectedChildEpoch: number | null = null;
-				let lastActionType: string | null = null;
+				async (actions) => {
+					const state = createState();
+					let expectedChildEpoch: number | null = null;
 
-				for (const action of actions) {
-					const prevChildEpoch = state.childSessionEpoch;
-					await apply(state, action);
+					for (const action of actions) {
+						const prevChildEpoch = state.childSessionEpoch;
+						await apply(state, action);
 
-					if (action.type === "reset") {
-						// After reset, childSessionEpoch should have incremented
-						if (expectedChildEpoch === null) {
-							expectedChildEpoch = prevChildEpoch + 1;
+						if (action.type === "reset") {
+							// After reset, childSessionEpoch should have incremented
+							if (expectedChildEpoch === null) {
+								expectedChildEpoch = prevChildEpoch + 1;
+							} else {
+								expectedChildEpoch = state.childSessionEpoch;
+							}
+							assert.equal(
+								state.childSessionEpoch,
+								expectedChildEpoch,
+								`childSessionEpoch must be ${expectedChildEpoch} after reset (prev=${prevChildEpoch})`,
+							);
+							expectedChildEpoch = state.childSessionEpoch;
 						} else {
+							// Non-reset: childSessionEpoch must be unchanged
+							assert.equal(
+								state.childSessionEpoch,
+								prevChildEpoch,
+								`childSessionEpoch must not change on ${action.type} action`,
+							);
 							expectedChildEpoch = state.childSessionEpoch;
 						}
-						assert.equal(
-							state.childSessionEpoch,
-							expectedChildEpoch,
-							`childSessionEpoch must be ${expectedChildEpoch} after reset (prev=${prevChildEpoch})`,
-						);
-						expectedChildEpoch = state.childSessionEpoch;
-					} else {
-						// Non-reset: childSessionEpoch must be unchanged
-						assert.equal(
-							state.childSessionEpoch,
-							prevChildEpoch,
-							`childSessionEpoch must not change on ${action.type} action`,
-						);
-						expectedChildEpoch = state.childSessionEpoch;
 					}
-					lastActionType = action.type;
-				}
-			},
-		),
-		{ numRuns: 100 },
-	);
+				},
+			),
+			{ numRuns: 100 },
+		);
+	} finally {
+		h.teardown();
+	}
 });
 
 test("Property 4: Reset clears all state fields", async () => {
-	await fc.assert(
-		fc.asyncProperty(
-			fc.array(
-				fc.oneof(
-					fc.constant({ type: "reset" } as StateAction),
-					fc.record({ type: fc.constant("setTopic"), name: arbTopicName }),
-					fc.constant({ type: "clearTopic" } as StateAction),
-					fc.record({ type: fc.constant("savePage"), name: arbPageName }),
-					fc.record({ type: fc.constant("addChildSession"), id: arbSessionId }),
-					fc.constant({ type: "abortChildren" } as StateAction),
+	const h = createTestHarness();
+	try {
+		await fc.assert(
+			fc.asyncProperty(
+				fc.array(
+					fc.oneof(
+						fc.constant({ type: "reset" } as StateAction),
+						fc.record({ type: fc.constant("setTopic"), name: arbTopicName }),
+						fc.constant({ type: "clearTopic" } as StateAction),
+						fc.record({ type: fc.constant("savePage"), name: arbPageName }),
+						fc.record({ type: fc.constant("addChildSession"), id: arbSessionId }),
+						fc.constant({ type: "abortChildren" } as StateAction),
+					),
+					{ maxLength: 30 },
 				),
-				{ maxLength: 30 },
-			),
-			async (actions) => {
-				const state = createState();
+				async (actions) => {
+					const state = createState();
 
-				for (const action of actions) {
-					await apply(state, action);
+					for (const action of actions) {
+						await apply(state, action);
 
-					// After every reset, assert full clear
-					if (action.type === "reset") {
-						assertResetClears(state);
+						// After every reset, assert full clear
+						if (action.type === "reset") {
+							assertResetClears(state);
+						}
 					}
-				}
 
-				// Also test explicitly: create fresh state, perform some work, then reset
-				const s2 = createState();
-				setActiveNotebookTopic(s2, "test-topic", "agent");
-				await saveNotebookPage(mockPi, s2, "my-page", "some content");
-				resetState(s2);
-				assertResetClears(s2);
-			},
-		),
-		{ numRuns: 100 },
-	);
+					// Also test explicitly: create fresh state, perform some work, then reset
+					const s2 = createState();
+					setActiveNotebookTopic(s2, "test-topic", "agent");
+					await saveNotebookPage(mockPi, s2, "my-page", "some content");
+					resetState(s2);
+					assertResetClears(s2);
+				},
+			),
+			{ numRuns: 100 },
+		);
+	} finally {
+		h.teardown();
+	}
 });
 
 test("Property 5: Epoch monotonicity — non-zero after savePage", async () => {
-	await fc.assert(
-		fc.asyncProperty(
-			fc.array(
-				fc.oneof(
-					fc.constant({ type: "reset" } as StateAction),
-					fc.record({ type: fc.constant("savePage"), name: arbPageName }),
-					fc.constant({ type: "clearTopic" } as StateAction),
+	const h = createTestHarness();
+	try {
+		await fc.assert(
+			fc.asyncProperty(
+				fc.array(
+					fc.oneof(
+						fc.constant({ type: "reset" } as StateAction),
+						fc.record({ type: fc.constant("savePage"), name: arbPageName }),
+						fc.constant({ type: "clearTopic" } as StateAction),
+					),
+					{ maxLength: 30 },
 				),
-				{ maxLength: 30 },
-			),
-			async (actions) => {
-				const state = createState();
+				async (actions) => {
+					const state = createState();
 
-				assert.equal(state.epoch, 0, "epoch must be 0 on fresh state");
+					assert.equal(state.epoch, 0, "epoch must be 0 on fresh state");
 
-				for (const action of actions) {
-					const prevEpoch: number = state.epoch;
-					await apply(state, action);
+					for (const action of actions) {
+						const prevEpoch: number = state.epoch;
+						await apply(state, action);
 
-					if (action.type === "savePage") {
-						// After first savePage, epoch transitions from 0 to Date.now() (> 0)
-						// After subsequent saves, epoch is unchanged (set once)
-						assert.ok(
-							state.epoch > 0,
-							`epoch must be > 0 after savePage, got ${state.epoch}`,
-						);
-						if (prevEpoch === 0) {
-							// First write: epoch transitions from 0 to Date.now()
+						if (action.type === "savePage") {
+							// After first savePage, epoch transitions from 0 to Date.now() (> 0)
+							// After subsequent saves, epoch is unchanged (set once)
 							assert.ok(
-								state.epoch >= Date.now() - 5000,
-								`epoch ${state.epoch} should be recent Date.now()`,
+								state.epoch > 0,
+								`epoch must be > 0 after savePage, got ${state.epoch}`,
 							);
+							if (prevEpoch === 0) {
+								// First write: epoch transitions from 0 to Date.now()
+								assert.ok(
+									state.epoch >= Date.now() - 5000,
+									`epoch ${state.epoch} should be recent Date.now()`,
+								);
+							} else {
+								// Subsequent writes: epoch unchanged
+								assert.equal(state.epoch, prevEpoch, "epoch must not change on subsequent savePage");
+							}
+						} else if (action.type === "reset") {
+							// Reset sets epoch to 0
+							assert.equal(state.epoch, 0, "epoch must be 0 after reset");
 						} else {
-							// Subsequent writes: epoch unchanged
-							assert.equal(state.epoch, prevEpoch, "epoch must not change on subsequent savePage");
+							// Non-save, non-reset: epoch unchanged
+							assert.equal(state.epoch, prevEpoch, "epoch unchanged on non-save/non-reset actions");
 						}
-					} else if (action.type === "reset") {
-						// Reset sets epoch to 0
-						assert.equal(state.epoch, 0, "epoch must be 0 after reset");
-					} else {
-						// Non-save, non-reset: epoch unchanged
-						assert.equal(state.epoch, prevEpoch, "epoch unchanged on non-save/non-reset actions");
 					}
-				}
-			},
-		),
-		{ numRuns: 100 },
-	);
+				},
+			),
+			{ numRuns: 100 },
+		);
+	} finally {
+		h.teardown();
+	}
 });
 
 test("Property 6: childSessionEpoch monotonicity (never decreases)", async () => {
-	await fc.assert(
-		fc.asyncProperty(
-			fc.array(
-				fc.oneof(
-					fc.constant({ type: "reset" } as StateAction),
-					fc.record({ type: fc.constant("setTopic"), name: arbTopicName }),
-					fc.constant({ type: "clearTopic" } as StateAction),
-					fc.record({ type: fc.constant("savePage"), name: arbPageName }),
+	const h = createTestHarness();
+	try {
+		await fc.assert(
+			fc.asyncProperty(
+				fc.array(
+					fc.oneof(
+						fc.constant({ type: "reset" } as StateAction),
+						fc.record({ type: fc.constant("setTopic"), name: arbTopicName }),
+						fc.constant({ type: "clearTopic" } as StateAction),
+						fc.record({ type: fc.constant("savePage"), name: arbPageName }),
+					),
+					{ maxLength: 30 },
 				),
-				{ maxLength: 30 },
-			),
-			async (actions) => {
-				const state = createState();
-				let maxSeenEpoch = 0;
+				async (actions) => {
+					const state = createState();
+					let maxSeenEpoch = 0;
 
-				for (const action of actions) {
-					await apply(state, action);
-					assert.ok(
-						state.childSessionEpoch >= maxSeenEpoch,
-						`childSessionEpoch must never decrease: was ${maxSeenEpoch}, got ${state.childSessionEpoch}`,
-					);
-					maxSeenEpoch = Math.max(maxSeenEpoch, state.childSessionEpoch);
-				}
-			},
-		),
-		{ numRuns: 100 },
-	);
+					for (const action of actions) {
+						await apply(state, action);
+						assert.ok(
+							state.childSessionEpoch >= maxSeenEpoch,
+							`childSessionEpoch must never decrease: was ${maxSeenEpoch}, got ${state.childSessionEpoch}`,
+						);
+						maxSeenEpoch = Math.max(maxSeenEpoch, state.childSessionEpoch);
+					}
+				},
+			),
+			{ numRuns: 100 },
+		);
+	} finally {
+		h.teardown();
+	}
 });
