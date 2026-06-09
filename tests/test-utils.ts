@@ -50,14 +50,15 @@ export interface TestHarness {
  * single active harness per test.
  *
  * CRITICAL: ESM static imports resolve before any module body runs. This means
- * spawn/renderer.ts registers the production frame scheduler at import time,
- * and createTestHarness() (called in beforeEach) always wins because tests
- * import this module after production modules. Never use dynamic import() to
- * load spawn/renderer.ts after createTestHarness() — the production scheduler
- * would overwrite the test one.
+ * spawn/renderer.ts registers the production frame scheduler at import time.
+ * The test harness replaces the frame scheduler with a fresh test scheduler.
+ * This works correctly as long as test-utils.ts is imported before spawn/renderer.ts
+ * in the module graph. Never use dynamic import() to load spawn/renderer.ts after
+ * createTestHarness() — the production scheduler would overwrite the test one.
  */
 export function createTestHarness(): TestHarness {
 	const previousSingletons = getSingletons();
+
 	const singletons: RuntimeSingletons = {
 		writeLock: createWriteLock(),
 		writeContext: new AsyncLocalStorage<true>(),
