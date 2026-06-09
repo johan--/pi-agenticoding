@@ -1,6 +1,6 @@
 // Bootstrap module for `--import` that registers the custom module loader.
 // Replaces the deprecated `--experimental-loader` flag.
-// Phase 1: uses module.register() — safe on Node <25.
+// Phase 1: uses module.register() — available on Node >=22.
 // Phase 2: migrate to module.registerHooks() when targeting Node >=25.
 import { register } from "node:module";
 import { dirname, resolve } from "node:path";
