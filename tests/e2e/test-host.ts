@@ -70,6 +70,8 @@ const mockCtx = {
 	getContextUsage: () => null,
 	sessionManager: null,
 	modelRegistry: null,
+	// Required by spawn tool which checks ctx.model existence before using it
+	model: undefined,
 	isIdle: () => true,
 	signal: new AbortController().signal,
 	abort: () => {},
@@ -77,7 +79,7 @@ const mockCtx = {
 	shutdown: () => process.exit(0),
 	compact: () => {},
 	getSystemPrompt: () => "",
-};
+} as any; // Type assertion needed: mock intentionally omits some interface fields
 
 // ── REPL loop ────────────────────────────────────────────────────
 
