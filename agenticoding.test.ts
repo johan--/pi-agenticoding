@@ -6119,6 +6119,9 @@ test("classifyBashCommand blocks package manager mutations directly", () => {
 	assert.equal(isBlocked("pip install requests"), true);
 	assert.equal(isBlocked("brew install node"), true);
 	assert.equal(isBlocked("apt-get install ripgrep"), true);
+	assert.equal(isBlocked("pip3 install requests"), true, "pip3 variant");
+	assert.equal(isBlocked("npm i lodash"), true, "npm i short form");
+	assert.equal(isBlocked("yarn add lodash"), true, "yarn add");
 });
 
 test("applyReadonlyBashGuard fallback mirrors classifyBashCommand on unsupported platforms", () => {

@@ -86,7 +86,7 @@ const INTERPRETERS = new Set(Object.keys(INTERPRETER_EXEC_FLAGS));
 // Package managers are blocked unconditionally — they mutate system state
 // outside any single directory (npm install writes to node_modules, pip
 // installs to site-packages, etc.). Temp-dir path checking is not meaningful.
-const PACKAGE_MANAGERS = new Set(["npm", "yarn", "pnpm", "pip", "apt", "apt-get", "brew", "cargo", "gem", "yum", "dnf", "pacman", "choco"]);
+const PACKAGE_MANAGERS = new Set(["npm", "yarn", "pnpm", "pip", "pip3", "pipx", "apt", "apt-get", "brew", "cargo", "gem", "yum", "dnf", "pacman", "choco"]);
 
 
 /**
@@ -498,7 +498,7 @@ function isPackageMutation(args: string[]): boolean {
 	// Match individual tokens against known package-mutation verbs.
 	// Token-level matching (vs. substring-on-joined-string) avoids false
 	// positives when a path or argument contains a verb word (install-sh, etc.).
-	const VERBS = new Set(["install", "uninstall", "update", "upgrade", "ci", "link", "publish", "add", "remove", "reinstall", "tap", "untap", "download", "build-dep"]);
+	const VERBS = new Set(["install", "uninstall", "update", "upgrade", "ci", "link", "publish", "add", "remove", "reinstall", "tap", "untap", "download", "build-dep", "i", "un", "ad", "rm", "up", "in", "rb"]);
 	return args.some((a) => VERBS.has(a.toLowerCase()));
 }
 
