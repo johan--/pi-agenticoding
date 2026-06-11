@@ -5632,6 +5632,32 @@ test("classifyBashCommand resolves ~ paths", () => {
 	assert.equal(isDirect(`ls ${tmp}`), true, "non-mutating ls to temp is allowed");
 });
 
+test("classifyBashCommand allows temp paths carried through shell variables across segments", () => {
+	const tmp = os.tmpdir();
+	assert.equal(isDirect(`tmp=${tmp}/pi-readonly-file; rm "$tmp"`), true, "rm via assigned temp var allowed");
+	assert.equal(isDirect(`tmp=${tmp}/pi-readonly-file; echo hi > "$tmp"`), true, "redirect via assigned temp var allowed");
+	assert.equal(isDirect('f=$(mktemp); echo hi > "$f"'), true, "mktemp assignment should be treated as temp");
+	assert.equal(isBlocked('f=/etc/passwd; echo hi > "$f"'), true, "non-temp assigned var still blocked");
+});
+
+test("classifyBashCommand tracks export-prefixed shell assignments", () => {
+	const tmp = os.tmpdir();
+	assert.equal(isDirect(`export T=${tmp}/x; rm "$T"`), true, "export assignment tracked");
+	assert.equal(isBlocked('export T=/etc/x; rm "$T"'), true, "export non-temp still blocked");
+	assert.equal(isDirect(`declare -r T=${tmp}/x; cat "$T"`), true, "declare -r assignment tracked");
+});
+
+test("classifyBashCommand propagates shellVars through sudo", () => {
+	const tmp = os.tmpdir();
+	assert.equal(isDirect(`tmp=${tmp}/x; sudo rm "$tmp"`), true, "sudo with temp var allowed");
+	assert.equal(isBlocked('tmp=/etc/x; sudo rm "$tmp"'), true, "sudo with non-temp var blocked");
+});
+
+test("classifyBashCommand propagates vars across && segments", () => {
+	const tmp = os.tmpdir();
+	assert.equal(isDirect(`a=${tmp}/x && b=$a && rm "$b"`), true, "cascading var across && allowed");
+});
+
 // ── classifyBashCommand: exact-string contract tests ─────────────────
 
 test("classifyBashCommand exact reason: git mutable block", () => {
@@ -5998,6 +6024,10 @@ test("classifyBashCommand uses the last wget output flag", () => {
 	assert.equal(isBlocked("wget --output-document=- --output-document=/etc/passwd http://example.com"), true, "later long output flag should win over stdout");
 	assert.equal(isDirect(`wget -O /etc/passwd -O ${tmp}/out.html http://example.com`), true, "later temp output should win over earlier unsafe path");
 	assert.equal(isDirect(`wget -O ${tmp}/out.html -O- http://example.com`), true, "later stdout output should win over earlier temp path");
+});
+
+test("classifyBashCommand blocks mktemp -d with non-temp pattern", () => {
+	assert.equal(isBlocked('f=$(mktemp -d /etc/temp.XXXX); echo hi > "$f/ok"'), true, "mktemp -d with explicit non-temp dir should be blocked");
 });
 
 // ── N4: xargs command classification ───────────────────────────────

@@ -104,26 +104,31 @@ const PACKAGE_MANAGERS = new Set(["npm", "yarn", "pnpm", "pip", "pip3", "pipx", 
  * @returns {ok: true} if allowed, or {ok: false, reason} with explanation
  */
 
-export function classifyBashCommand(cmd: string, cwd: string = process.cwd(), depth: number = 0): Verdict {
+export function classifyBashCommand(cmd: string, cwd: string = process.cwd(), depth: number = 0, shellVars: ReadonlyMap<string, string> = new Map()): Verdict {
 	if (depth > 10) return { ok: false, reason: "recursion depth exceeded in command classification" };
+	const localVars = new Map(shellVars);
 	for (const rawSegment of splitUnquotedShellSegments(cmd)) {
 		const segment = rawSegment.trim();
 		if (!segment) continue;
 
 		for (const subcommand of extractCommandSubstitutions(segment)) {
-			const nested = classifyBashCommand(subcommand, cwd, depth + 1);
+			const nested = classifyBashCommand(subcommand, cwd, depth + 1, localVars);
 			if (!nested.ok) {
 				return { ok: false, reason: `command substitution blocked: ${nested.reason}` };
 			}
 		}
 
-		const redirectTarget = getUnsafeWriteRedirectTarget(segment, cwd);
+		const redirectTarget = getUnsafeWriteRedirectTarget(segment, cwd, localVars);
 		if (redirectTarget) {
 			return { ok: false, reason: `write redirect blocked outside temp dir: ${redirectTarget}` };
 		}
 
-		const mutationReason = getFilesystemMutationReason(segment, cwd, depth);
+		const mutationReason = getFilesystemMutationReason(segment, cwd, depth, localVars);
 		if (mutationReason) return { ok: false, reason: mutationReason };
+
+		for (const [name, value] of getStandaloneShellAssignments(segment, cwd)) {
+			localVars.set(name, value);
+		}
 	}
 
 	return { ok: true };
@@ -138,7 +143,7 @@ export function classifyBashCommand(cmd: string, cwd: string = process.cwd(), de
  * Command names are compared case-insensitively (normalized via .toLowerCase()).
  * Unknown commands return null (allowed).
  */
-function getFilesystemMutationReason(segment: string, cwd: string, depth: number = 0): string | null {
+function getFilesystemMutationReason(segment: string, cwd: string, depth: number = 0, shellVars: ReadonlyMap<string, string> = new Map()): string | null {
 	const tokens = getCommandTokens(segment);
 	const command = tokens[0]?.toLowerCase();
 	if (!command) return null;
@@ -146,18 +151,18 @@ function getFilesystemMutationReason(segment: string, cwd: string, depth: number
 	// Strip subshell parens: (rm file) → rm file
 	if (command.startsWith("(") && segment.endsWith(")")) {
 		const inner = segment.slice(1, -1).trim();
-		return inner ? getFilesystemMutationReason(inner, cwd, depth) : null;
+		return inner ? getFilesystemMutationReason(inner, cwd, depth, shellVars) : null;
 	}
 
 	// eval/exec: recursively classify the remaining argument string
 	if (command === "eval" || command === "exec") {
 		const inner = tokens.slice(1).map(stripMatchingQuotes).join(" ");
-		const nested = classifyBashCommand(inner, cwd, depth + 1);
+		const nested = classifyBashCommand(inner, cwd, depth + 1, shellVars);
 		return nested.ok ? null : nested.reason;
 	}
 
 	if (command === "sudo") {
-		const nested = classifyBashCommand(tokens.slice(findSudoCommandIndex(tokens)).join(" "), cwd, depth + 1);
+		const nested = classifyBashCommand(tokens.slice(findSudoCommandIndex(tokens)).join(" "), cwd, depth + 1, shellVars);
 		return nested.ok ? null : nested.reason;
 	}
 
@@ -168,7 +173,7 @@ function getFilesystemMutationReason(segment: string, cwd: string, depth: number
 		// remaining tokens, leaving tokens.length === 1 (just ["env"]).
 		// In that case, find the -S value in the raw segment and classify it.
 		if (tokens.length > 1) {
-			const nested = classifyBashCommand(tokens.slice(1).join(" "), cwd, depth + 1);
+			const nested = classifyBashCommand(tokens.slice(1).join(" "), cwd, depth + 1, shellVars);
 			return nested.ok ? null : nested.reason;
 		}
 		// env with only flags (e.g., env -S "cmd") — extract -S value
@@ -176,7 +181,7 @@ function getFilesystemMutationReason(segment: string, cwd: string, depth: number
 		if (sMatch) {
 			const afterS = segment.slice(sMatch.index! + sMatch[0].length).trim();
 			const stripped = stripMatchingQuotes(afterS);
-			const nested = classifyBashCommand(stripped, cwd, depth + 1);
+			const nested = classifyBashCommand(stripped, cwd, depth + 1, shellVars);
 			return nested.ok ? null : nested.reason;
 		}
 		return null;
@@ -197,7 +202,7 @@ function getFilesystemMutationReason(segment: string, cwd: string, depth: number
 			const idx = args.indexOf(flag);
 			if (idx !== -1 && idx + 1 < args.length) {
 				const inlineScript = stripMatchingQuotes(args[idx + 1]);
-				const nested = classifyBashCommand(inlineScript, cwd, depth + 1);
+				const nested = classifyBashCommand(inlineScript, cwd, depth + 1, shellVars);
 				if (!nested.ok) {
 					return `${command} ${flag} blocked: ${nested.reason}`;
 				}
@@ -206,7 +211,7 @@ function getFilesystemMutationReason(segment: string, cwd: string, depth: number
 	}
 
 	const ddMatch = segment.match(/\bof=([^\s]+)/);
-	if (ddMatch && !isTempPath(ddMatch[1], cwd)) {
+	if (ddMatch && !isTempPath(ddMatch[1], cwd, shellVars)) {
 		return `dd output blocked outside temp dir: ${stripMatchingQuotes(ddMatch[1])}`;
 	}
 
@@ -252,7 +257,7 @@ function getFilesystemMutationReason(segment: string, cwd: string, depth: number
 			const xTokens = xArgs.slice(cmdStart);
 			// L1: Full classifier check (catches git, interpreters, package managers, etc.)
 			const inner = xTokens.join(" ");
-			const nested = classifyBashCommand(inner, cwd, depth + 1);
+			const nested = classifyBashCommand(inner, cwd, depth + 1, shellVars);
 			if (!nested.ok) return nested.reason;
 			// L2: xargs feeds stdin as arguments, so even targetless mutation commands
 			// (rm, mv, rm, sed -i, etc.) are dangerous — the targets come from the pipe.
@@ -269,7 +274,7 @@ function getFilesystemMutationReason(segment: string, cwd: string, depth: number
 	const paths = getMutationTargets(command, tokens);
 	if (!paths) return null;
 	for (const target of paths) {
-		if (!isTempPath(target, cwd)) {
+		if (!isTempPath(target, cwd, shellVars)) {
 			return `${command} blocked outside temp dir: ${stripMatchingQuotes(target)}`;
 		}
 	}
@@ -603,13 +608,79 @@ function stripMatchingQuotes(token: string): string {
 }
 
 /**
- * Resolve a path's real location, following symlinks.
- * If the path doesn't exist, walk up to the nearest existing ancestor
- * and resolve that, then append the remaining components.
- * This handles the common case where a new file is created inside a
- * symlinked temp dir (/tmp -> /private/tmp).
+ * Expand shell variable references ($VAR, ${VAR}) in a raw path string.
+ * Looks up the variable name in the provided map first, then falls back
+ * to process.env. Returns null if the path contains no variable reference
+ * or the variable is unknown.
  */
-function isTempPath(rawPath: string, cwd: string): boolean {
+function expandShellVariable(rawPath: string, shellVars: ReadonlyMap<string, string>, visited: Set<string> = new Set()): string | null {
+	const braceMatch = rawPath.match(/^\$\{([A-Za-z_][A-Za-z0-9_]*)\}(.*)$/);
+	if (braceMatch) {
+		const varName = braceMatch[1];
+		if (visited.has(varName)) return null;
+		visited.add(varName);
+		const value = shellVars.get(varName) ?? process.env[varName];
+		return value ? value + braceMatch[2] : null;
+	}
+	const plainMatch = rawPath.match(/^\$([A-Za-z_][A-Za-z0-9_]*)(.*)$/);
+	if (plainMatch) {
+		const varName = plainMatch[1];
+		if (visited.has(varName)) return null;
+		visited.add(varName);
+		const value = shellVars.get(varName) ?? process.env[varName];
+		return value ? value + plainMatch[2] : null;
+	}
+	return null;
+}
+
+/**
+ * Extract standalone shell variable assignments from a segment.
+ * Handles: VAR=value, export VAR=value, declare -r VAR=value, etc.
+ * Declaration keywords (export/declare/typeset/local/readonly) and their
+ * flags are skipped before looking for assignments.
+ * Returns empty map if any non-keyword, non-flag token is not an assignment.
+ * Special-cases $(mktemp) to a synthetic temp-dir path.
+ */
+function getStandaloneShellAssignments(segment: string, cwd: string): Map<string, string> {
+	const assignments = new Map<string, string>();
+	let tokens: string[] = segment.match(/"[^"]*"|'[^']*'|\S+/g) ?? [];
+	if (tokens.length === 0) return assignments;
+
+	// Skip declaration keywords and their flags (export -x, declare -r, etc.)
+	const DECL_KEYWORDS = new Set(["export", "declare", "typeset", "local", "readonly"]);
+	if (tokens.length > 0 && DECL_KEYWORDS.has(tokens[0]!)) {
+		tokens = tokens.slice(1) as string[];
+		// Skip flags after the keyword (e.g., declare -r -x VAR=val)
+		while (tokens.length > 0 && tokens[0]!.startsWith("-")) {
+			tokens = tokens.slice(1) as string[];
+		}
+	}
+	for (const token of tokens) {
+		const match = token.match(/^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
+		if (!match) continue;
+		const [, name, rawValue] = match;
+		const value = stripMatchingQuotes(rawValue);
+		if ((rawValue.endsWith(")") && /^\$\((?:command\s+)?mktemp(?:\s|$|\))/u.test(rawValue)) || /^`(?:command\s+)?mktemp(?:\s|$)/u.test(rawValue)) {
+			// Synthetic path is only safe when mktemp has no explicit non-temp template.
+			// Extract positional args from the inner mktemp invocation to check.
+			const innerCmd = rawValue.replace(/^\$\(|^`|\)$/g, "");
+			const innerArgs = innerCmd.match(/"[^"]*"|'[^']*'|\S+/g) ?? [];
+			const positional = innerArgs.filter((a) => a !== "mktemp" && !a.startsWith("command") && !a.startsWith("-"));
+			const lastPos = positional[positional.length - 1];
+			if (lastPos && lastPos.startsWith("/") && !isTempPath(lastPos, cwd)) {
+				// Explicit non-temp template — don't synthesize a temp path (would be a false negative)
+				assignments.set(name, value);
+				continue;
+			}
+			assignments.set(name, path.join(TEMP_DIR, `.pi-mktemp-${name.toLowerCase()}`));
+			continue;
+		}
+		assignments.set(name, value);
+	}
+	return assignments;
+}
+
+function isTempPath(rawPath: string, cwd: string, shellVars: ReadonlyMap<string, string> = new Map(), visited: Set<string> = new Set()): boolean {
 	const normalized = stripMatchingQuotes(rawPath);
 	if (!normalized || normalized === "/dev/null" || /^&\d+$/.test(normalized)) return true;
 
@@ -621,6 +692,11 @@ function isTempPath(rawPath: string, cwd: string): boolean {
 			return isTempPath(expanded, cwd);
 		}
 		return false; // ~user/path cannot be resolved safely
+	}
+
+	const expandedVar = expandShellVariable(normalized, shellVars, visited);
+	if (expandedVar !== null && expandedVar !== normalized) {
+		return isTempPath(expandedVar, cwd, shellVars, visited);
 	}
 
 	if (/[*?`{}()\[\]]/.test(normalized)) {
@@ -697,7 +773,7 @@ function readRedirectTarget(
  * Heredoc redirect targets (<<EOF) are stdin, not file writes, and are not checked.
  * This is a best-effort inspection layer, not a security sandbox.
  */
-function getUnsafeWriteRedirectTarget(cmd: string, cwd: string): string | null {
+function getUnsafeWriteRedirectTarget(cmd: string, cwd: string, shellVars: ReadonlyMap<string, string> = new Map()): string | null {
 	let quote: '"' | "'" | null = null;
 	let escaped = false;
 
@@ -717,7 +793,7 @@ function getUnsafeWriteRedirectTarget(cmd: string, cwd: string): string | null {
 		// >& = combined stdout+stderr redirect to a file, treat as 2-char operator
 		const opLen = next === ">" || next === "|" || next === "&" ? 2 : 1;
 		const { target, end } = readRedirectTarget(cmd, i + opLen);
-		if (!isTempPath(target, cwd)) return stripMatchingQuotes(target) || "(unknown target)";
+		if (!isTempPath(target, cwd, shellVars)) return stripMatchingQuotes(target) || "(unknown target)";
 		i = Math.max(i, end - 1);
 	}
 
