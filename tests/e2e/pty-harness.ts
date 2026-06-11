@@ -19,89 +19,89 @@ const DEFAULT_TIMEOUT_MS = 5000;
 const TIMEOUT_MS = parseInt(process.env.E2E_TIMEOUT_MS ?? "", 10) || DEFAULT_TIMEOUT_MS;
 
 export class ProcessHarness {
-  private child: ChildProcessWithoutNullStreams;
-  private output = "";
-  private readOffset = 0;
-  private timeoutMs: number;
-  private waiters = new Set<() => void>();
+	private child: ChildProcessWithoutNullStreams;
+	private output = "";
+	private readOffset = 0;
+	private timeoutMs: number;
+	private waiters = new Set<() => void>();
 
-  constructor(
-    scriptPath = DEFAULT_SCRIPT,
-    options?: { timeoutMs?: number },
-  ) {
-    this.timeoutMs = options?.timeoutMs ?? TIMEOUT_MS;
+	constructor(
+		scriptPath = DEFAULT_SCRIPT,
+		options?: { timeoutMs?: number },
+	) {
+		this.timeoutMs = options?.timeoutMs ?? TIMEOUT_MS;
 
-    const entry = isAbsolute(scriptPath) ? scriptPath : resolve(ROOT, scriptPath);
+		const entry = isAbsolute(scriptPath) ? scriptPath : resolve(ROOT, scriptPath);
 
-    this.child = spawn(process.execPath, ["--import", LOADER, entry], {
-      cwd: ROOT,
-      stdio: ["pipe", "pipe", "pipe"],
-      env: {
-        ...process.env,
-        FORCE_COLOR: "0",
-        NODE_OPTIONS: "",
-      },
-    });
+		this.child = spawn(process.execPath, ["--import", LOADER, entry], {
+			cwd: ROOT,
+			stdio: ["pipe", "pipe", "pipe"],
+			env: {
+				...process.env,
+				FORCE_COLOR: "0",
+				NODE_OPTIONS: "",
+			},
+		});
 
-    const append = (chunk: string | Buffer) => {
-      this.output += chunk.toString();
-      for (const wake of this.waiters) wake();
-      this.waiters.clear();
-    };
+		const append = (chunk: string | Buffer) => {
+			this.output += chunk.toString();
+			for (const wake of this.waiters) wake();
+			this.waiters.clear();
+		};
 
-    this.child.stdout.on("data", append);
-    this.child.stderr.on("data", append);
-  }
+		this.child.stdout.on("data", append);
+		this.child.stderr.on("data", append);
+	}
 
-  private async waitForOutput(ms: number): Promise<void> {
-    if (ms <= 0) return;
-    await new Promise<void>((resolve) => {
-      const wake = () => {
-        clearTimeout(timer);
-        this.waiters.delete(wake);
-        resolve();
-      };
-      const timer = setTimeout(wake, ms);
-      this.waiters.add(wake);
-    });
-  }
+	private async waitForOutput(ms: number): Promise<void> {
+		if (ms <= 0) return;
+		await new Promise<void>((resolve) => {
+			const wake = () => {
+				clearTimeout(timer);
+				this.waiters.delete(wake);
+				resolve();
+			};
+			const timer = setTimeout(wake, ms);
+			this.waiters.add(wake);
+		});
+	}
 
-  /** Wait for a fresh substring to appear after the prior match. */
-  async waitForText(text: string): Promise<void> {
-    const deadline = Date.now() + this.timeoutMs;
-    while (Date.now() < deadline) {
-      const index = this.output.indexOf(text, this.readOffset);
-      if (index !== -1) {
-        this.readOffset = index + text.length;
-        return;
-      }
-      await this.waitForOutput(deadline - Date.now());
-    }
-    throw new Error(
-      `waitForText timeout after ${this.timeoutMs}ms looking for fresh \"${text}\".\n` +
-        `Output so far:\n${this.output}`,
-    );
-  }
+	/** Wait for a fresh substring to appear after the prior match. */
+	async waitForText(text: string): Promise<void> {
+		const deadline = Date.now() + this.timeoutMs;
+		while (Date.now() < deadline) {
+			const index = this.output.indexOf(text, this.readOffset);
+			if (index !== -1) {
+				this.readOffset = index + text.length;
+				return;
+			}
+			await this.waitForOutput(deadline - Date.now());
+		}
+		throw new Error(
+			`waitForText timeout after ${this.timeoutMs}ms looking for fresh \"${text}\".\n` +
+				`Output so far:\n${this.output}`,
+		);
+	}
 
-  /** Write a line of input to the child process. */
-  write(input: string): void {
-    this.child.stdin.write(input + "\n");
-  }
+	/** Write a line of input to the child process. */
+	write(input: string): void {
+		this.child.stdin.write(input + "\n");
+	}
 
-  /** Return all accumulated output since creation or last clear(). */
-  snapshot(): string {
-    return this.output;
-  }
+	/** Return all accumulated output since creation or last clear(). */
+	snapshot(): string {
+		return this.output;
+	}
 
-  /** Clear accumulated output and match cursor, keeping the child running. */
-  clear(): void {
-    this.output = "";
-    this.readOffset = 0;
-  }
+	/** Clear accumulated output and match cursor, keeping the child running. */
+	clear(): void {
+		this.output = "";
+		this.readOffset = 0;
+	}
 
-  /** Kill the child process. */
-  close(): void {
-    this.child.stdin.end();
-    if (!this.child.killed) this.child.kill();
-  }
+	/** Kill the child process. */
+	close(): void {
+		this.child.stdin.end();
+		if (!this.child.killed) this.child.kill();
+	}
 }
