@@ -16,6 +16,7 @@ import type {
 	ToolDefinition,
 	ToolInfo,
 } from "@earendil-works/pi-coding-agent";
+import type { TextContent } from "@earendil-works/pi-ai";
 import {
 	AuthStorage,
 	createAgentSession,
@@ -47,9 +48,11 @@ const CHILD_MAX_BYTES = 50 * 1024;
 
 // ── Helpers ───────────────────────────────────────────────────────────
 
+// Widen to accept AgentMessage variants from session messages.
+// Functions that read these use runtime type checks.
 type AssistantMessageLike = {
 	role: string;
-	content?: { type: string; text?: string }[];
+	content?: unknown;
 	stopReason?: unknown;
 };
 
@@ -247,8 +250,8 @@ export async function executeSpawn(
 	signal: AbortSignal | undefined,
 	onUpdate:
 		| ((result: {
-				content: { type: string; text: string }[];
-				details?: unknown;
+				content: TextContent[];
+				details: unknown;
 		  }) => void)
 		| undefined,
 	defaultThinking: ThinkingValue,
@@ -394,12 +397,12 @@ export async function executeSpawn(
 		throw invalidatedError;
 	}
 
-	const resultText = getLastAssistantText(session.messages);
+	const resultText = getLastAssistantText(session.messages as AssistantMessageLike[]);
 	if (!resultText) {
 		clearChildSession();
 		throw new Error("Child agent produced no output.");
 	}
-	const outcome = wasAborted ? "aborted" : getLastAssistantOutcome(session.messages);
+	const outcome = wasAborted ? "aborted" : getLastAssistantOutcome(session.messages as AssistantMessageLike[]);
 	const { text: finalText, truncated } = truncateResult(resultText);
 
 	// Execution should not retain live children after completion. If the TUI
@@ -444,7 +447,7 @@ export async function executeSpawn(
 	}
 
 	return {
-		content: [{ type: "text" as const, text: finalText }],
+		content: [{ type: "text" as const, text: finalText }] as TextContent[],
 		details,
 	};
 }
@@ -480,8 +483,8 @@ export function registerSpawnTool(
 			signal: AbortSignal | undefined,
 			onUpdate:
 				| ((result: {
-						content: { type: string; text: string }[];
-						details?: unknown;
+						content: TextContent[];
+						details: unknown;
 				  }) => void)
 				| undefined,
 			ctx: ExtensionContext,
