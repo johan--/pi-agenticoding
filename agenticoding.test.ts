@@ -4309,6 +4309,32 @@ test("classifyBashCommand allows temp-safe shell parameter expansion defaults an
 	assert.equal(isBlocked(`f=\${${varName}:=/etc}; echo hi > "$f"`), true, '${VAR:=/etc} with unset var should be blocked');
 });
 
+test("classifyBashCommand preserves safe mktemp assignment flows", () => {
+	const tmp = os.tmpdir();
+	assert.equal(isDirect(`TMP=\`mktemp ${tmp}/pi.XXXXXX\`; echo ok > "$TMP"`), true, "backtick mktemp with explicit temp template");
+	assert.equal(isDirect('TMP="$(mktemp -d)"; echo ok > "$TMP/ok"'), true, "quoted $(mktemp -d) assignment");
+	assert.equal(isDirect('TMP="`mktemp -d`"; echo ok > "$TMP/ok"'), true, "quoted backtick mktemp");
+	assert.equal(
+		process.platform === "darwin"
+			? isDirect('f=$(mktemp -t pi.XXXXXX); echo hi > "$f"')
+			: isBlocked('f=$(mktemp -t pi.XXXXXX); echo hi > "$f"'),
+		true,
+		"mktemp -t should only be accepted on darwin",
+	);
+});
+
+test("classifyBashCommand blocks mktemp assignments with non-temp relative or variable templates", () => {
+	assert.equal(isBlocked("TMP=$(mktemp foo.XXXXXX); echo ok > \"$TMP\""), true, "relative mktemp template blocked");
+	assert.equal(isBlocked("TPL=foo.XXXXXX; TMP=$(mktemp \"$TPL\"); echo ok > \"$TMP\""), true, "mktemp with unresolved shell var template blocked");
+});
+test("classifyBashCommand blocks mktemp -p/--tmpdir assignments outside temp", () => {
+	assert.equal(isBlocked("TMP=$(mktemp -p /workspace pi.XXXXXX); echo ok > \"$TMP\""), true, "mktemp -p on non-temp dir blocked");
+	assert.equal(isBlocked("TMP=$(mktemp --tmpdir=/workspace pi.XXXXXX); echo ok > \"$TMP\""), true, "mktemp --tmpdir= on non-temp dir blocked");
+	assert.equal(isBlocked("TMP=$(mktemp --tmpdir workspace pi.XXXXXX); echo ok > \"$TMP\""), true, "mktemp --tmpdir relative dir blocked");
+	assert.equal(isBlocked("TMP=$(mktemp --tmpdir ./workspace pi.XXXXXX); echo ok > \"$TMP\""), true, "mktemp --tmpdir ./relative dir blocked");
+	assert.equal(isBlocked("TMP=$(mktemp --tmpdir ../workspace pi.XXXXXX); echo ok > \"$TMP\""), true, "mktemp --tmpdir ../relative dir blocked");
+});
+
 
 // ── Readonly mode: toggle + TUI indicator tests ────────────────────
 
@@ -4548,6 +4574,20 @@ test("readonly tool_call blocks non-temp bash writes when readonly is on", async
 	const tempAllowedInput = { command: `rm ${os.tmpdir()}/x` };
 	const tempAllowed = await toolCallHandler({ toolName: "bash", input: tempAllowedInput }, { cwd: "/workspace" });
 	assert.equal(tempAllowed, undefined);
+
+	const mktempAllowed = await toolCallHandler(
+		{ toolName: "bash", input: { command: 'f=$(mktemp --tmpdir pi.XXXX); echo hi > "$f"' } },
+		{ cwd: "/workspace" },
+	);
+	assert.equal(mktempAllowed, undefined);
+
+	const mktempBlocked = await toolCallHandler(
+		{ toolName: "bash", input: { command: 'f=$(mktemp --tmpdir workspace pi.XXXX); echo hi > "$f"' } },
+		{ cwd: "/workspace" },
+	);
+	assert.ok(mktempBlocked, "relative --tmpdir flow should be blocked");
+	assert.equal(mktempBlocked.block, true);
+	assert.match(mktempBlocked.reason, /outside temp dir/);
 
 	const safeInput = { command: "ls -la" };
 	const safeResult = await toolCallHandler({ toolName: "bash", input: safeInput }, { cwd: "/workspace" });
@@ -6046,8 +6086,25 @@ test("classifyBashCommand recognizes temp-dir download flags", () => {
 	assert.equal(isBlocked("curl -O --output-dir /etc http://example.com/file.txt"), true, "curl --output-dir non-temp blocked");
 });
 
-test("classifyBashCommand blocks mktemp -d with non-temp pattern", () => {
+test("classifyBashCommand allows mktemp-backed temp vars and blocks non-temp templates", () => {
+	const tmp = os.tmpdir();
+	assert.equal(isDirect('f=$(mktemp -d); echo hi > "$f/ok"'), true, "plain mktemp -d should stay temp-safe");
+	assert.equal(isDirect(`f=$(mktemp -d ${tmp}/pi.XXXX); echo hi > "$f/ok"`), true, "explicit temp mktemp template should stay temp-safe");
+	assert.equal(isDirect(`TMPBASE=${tmp} f=$(mktemp --tmpdir="$TMPBASE" pi.XXXX); echo hi > "$f/ok"`), true, "same-segment assignment chaining should stay temp-safe");
+	assert.equal(isDirect(`TMPBASE=${tmp}; f=$(mktemp --tmpdir="$TMPBASE" pi.XXXX); echo hi > "$f/ok"`), true, "quoted --tmpdir shell var should stay temp-safe");
+	assert.equal(
+		process.platform === "darwin"
+			? isDirect('f=$(mktemp -t pi.XXXX); echo hi > "$f"')
+			: isBlocked('f=$(mktemp -t pi.XXXX); echo hi > "$f"'),
+		true,
+		"mktemp -t should follow platform semantics",
+	);
 	assert.equal(isBlocked('f=$(mktemp -d /etc/temp.XXXX); echo hi > "$f/ok"'), true, "mktemp -d with explicit non-temp dir should be blocked");
+	assert.equal(isBlocked('f=$(echo /etc); echo hi > "$f/ok"'), true, "command-substituted non-temp dir should be blocked");
+	assert.equal(isBlocked('f=`echo /etc`; echo hi > "$f/ok"'), true, "backtick-substituted non-temp dir should be blocked");
+	assert.equal(isBlocked('f=$(printf /etc); touch "$f/x"'), true, "dynamic non-temp path should be blocked");
+	assert.equal(isDirect(`f=$(mktemp --suffix .bak ${tmp}/pi.XXXX); echo hi > "$f/ok"`), true, "--suffix flag should be properly skipped");
+	assert.equal(isDirect('f=$(mktemp --tmpdir pi.XXXX); echo hi > "$f"'), true, "mktemp --tmpdir without explicit dir uses default temp");
 });
 
 // ── N4: xargs command classification ───────────────────────────────

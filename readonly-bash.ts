@@ -126,7 +126,7 @@ export function classifyBashCommand(cmd: string, cwd: string = process.cwd(), de
 		const mutationReason = getFilesystemMutationReason(segment, cwd, depth, localVars);
 		if (mutationReason) return { ok: false, reason: mutationReason };
 
-		for (const [name, value] of getStandaloneShellAssignments(segment, cwd)) {
+		for (const [name, value] of getStandaloneShellAssignments(segment, cwd, localVars)) {
 			localVars.set(name, value);
 		}
 	}
@@ -683,7 +683,7 @@ function expandShellVariable(rawPath: string, shellVars: ReadonlyMap<string, str
  * Returns empty map if any non-keyword, non-flag token is not an assignment.
  * Special-cases $(mktemp) to a synthetic temp-dir path.
  */
-function getStandaloneShellAssignments(segment: string, cwd: string): Map<string, string> {
+function getStandaloneShellAssignments(segment: string, cwd: string, shellVars: ReadonlyMap<string, string> = new Map()): Map<string, string> {
 	const assignments = new Map<string, string>();
 	let tokens: string[] = segment.match(/"[^"]*"|'[^']*'|\S+/g) ?? [];
 	if (tokens.length === 0) return assignments;
@@ -697,29 +697,141 @@ function getStandaloneShellAssignments(segment: string, cwd: string): Map<string
 			tokens = tokens.slice(1) as string[];
 		}
 	}
-	for (const token of tokens) {
-		const match = token.match(/^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
+	for (let i = 0; i < tokens.length; i++) {
+		const match = tokens[i]?.match(/^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
 		if (!match) continue;
-		const [, name, rawValue] = match;
-		const value = stripMatchingQuotes(rawValue);
-		if ((rawValue.endsWith(")") && /^\$\((?:command\s+)?mktemp(?:\s|$|\))/u.test(rawValue)) || /^`(?:command\s+)?mktemp(?:\s|$)/u.test(rawValue)) {
-			// Synthetic path is only safe when mktemp has no explicit non-temp template.
-			// Extract positional args from the inner mktemp invocation to check.
-			const innerCmd = rawValue.replace(/^\$\(|^`|\)$/g, "");
-			const innerArgs = innerCmd.match(/"[^"]*"|'[^']*'|\S+/g) ?? [];
-			const positional = innerArgs.filter((a) => a !== "mktemp" && !a.startsWith("command") && !a.startsWith("-"));
-			const lastPos = positional[positional.length - 1];
-			if (lastPos && lastPos.startsWith("/") && !isTempPath(lastPos, cwd)) {
-				// Explicit non-temp template — don't synthesize a temp path (would be a false negative)
-				assignments.set(name, value);
-				continue;
+		const [, name, initialRawValue] = match;
+		let rawValue = initialRawValue;
+		const quoteWrapped = rawValue.startsWith('"');
+		const substitutionStart = quoteWrapped ? rawValue.slice(1) : rawValue;
+
+		// Tokenization splits command substitutions on spaces. Rejoin a standalone
+		// assignment value until the substitution closes so mktemp templates are visible.
+		if (substitutionStart.startsWith("$(")) {
+			let depth = 1;
+			for (const ch of substitutionStart.slice(2)) {
+				if (ch === "(") depth++;
+				if (ch === ")") depth--;
 			}
-			assignments.set(name, path.join(TEMP_DIR, `.pi-mktemp-${name.toLowerCase()}`));
+			while ((depth > 0 || (quoteWrapped && !rawValue.endsWith('"'))) && i + 1 < tokens.length) {
+				rawValue += ` ${tokens[++i]}`;
+				for (const ch of tokens[i]!) {
+					if (ch === "(") depth++;
+					if (ch === ")") depth--;
+				}
+			}
+		} else if (substitutionStart.startsWith("`")) {
+			while ((!rawValue.endsWith("`") || (quoteWrapped && !rawValue.endsWith('`"'))) && i + 1 < tokens.length) {
+				rawValue += ` ${tokens[++i]}`;
+			}
+		}
+
+		const value = stripMatchingQuotes(rawValue);
+		const assignmentVars = new Map(shellVars);
+		for (const [assignedName, assignedValue] of assignments) assignmentVars.set(assignedName, assignedValue);
+		const syntheticMktempPath = getSafeMktempSyntheticPath(value, cwd, assignmentVars, name);
+		if (syntheticMktempPath) {
+			assignments.set(name, syntheticMktempPath);
 			continue;
 		}
 		assignments.set(name, value);
 	}
 	return assignments;
+}
+
+function unwrapCommandSubstitution(rawValue: string): string | null {
+	const normalized = stripMatchingQuotes(rawValue);
+	if (normalized.startsWith("$(") && normalized.endsWith(")")) return normalized.slice(2, -1);
+	if (normalized.startsWith("`") && normalized.endsWith("`")) return normalized.slice(1, -1);
+	return null;
+}
+
+function getSafeMktempSyntheticPath(rawValue: string, cwd: string, shellVars: ReadonlyMap<string, string>, name: string): string | null {
+	const innerCmd = unwrapCommandSubstitution(rawValue);
+	if (!innerCmd) return null;
+
+	const innerTokens = getCommandTokens(innerCmd);
+	if (innerTokens[0] !== "mktemp") return null;
+
+	let template: string | null = null;
+	let tmpdirBase: string | null = null;
+	const args = innerTokens.slice(1);
+
+	for (let i = 0; i < args.length; i++) {
+		const arg = stripMatchingQuotes(args[i]!);
+		if (!arg) continue;
+		if (arg === "--") {
+			template = stripMatchingQuotes(args[i + 1] ?? "");
+			break;
+		}
+		if (arg === "-p") {
+			tmpdirBase = stripMatchingQuotes(args[i + 1] ?? "");
+			if (!tmpdirBase) return null;
+			i++;
+			continue;
+		}
+		if (arg.startsWith("-p") && arg.length > 2) {
+			tmpdirBase = stripMatchingQuotes(arg.slice(2));
+			continue;
+		}
+		if (arg === "-t") {
+			if (process.platform !== "darwin") return null;
+			template = stripMatchingQuotes(args[i + 1] ?? "");
+			if (!template) return null;
+			tmpdirBase = TEMP_DIR;
+			i++;
+			continue;
+		}
+		if (arg.startsWith("-t") && arg.length > 2) {
+			if (process.platform !== "darwin") return null;
+			template = stripMatchingQuotes(arg.slice(2));
+			if (!template) return null;
+			tmpdirBase = TEMP_DIR;
+			continue;
+		}
+		if (arg === "--tmpdir") {
+			// Bare --tmpdir defaults to TEMP_DIR, but with two following positionals
+			// the first is an explicit DIR even if relative, so validate it later.
+			const next = stripMatchingQuotes(args[i + 1] ?? "");
+			const nextNext = stripMatchingQuotes(args[i + 2] ?? "");
+			if (next && !next.startsWith("-") && nextNext && !nextNext.startsWith("-")) {
+				tmpdirBase = next;
+				i++;
+				continue;
+			}
+			if (next && !next.startsWith("-") && (next.startsWith("/") || next.startsWith("~") || next.startsWith("$") || next.includes("/") || next === "." || next === "..")) {
+				tmpdirBase = next;
+				i++;
+				continue;
+			}
+			tmpdirBase = TEMP_DIR;
+			continue;
+		}
+		if (arg.startsWith("--tmpdir=")) {
+			tmpdirBase = stripMatchingQuotes(arg.slice("--tmpdir=".length)) || TEMP_DIR;
+			continue;
+		}
+		if (arg === "--suffix") {
+			i++;
+			continue;
+		}
+		if (arg.startsWith("--suffix=")) continue;
+		if (arg.startsWith("-")) continue;
+		template = arg;
+	}
+
+	if (tmpdirBase !== null) {
+		if (!isTempPath(tmpdirBase, cwd, shellVars)) return null;
+		if (!template) return path.join(TEMP_DIR, `.pi-mktemp-${name.toLowerCase()}`);
+		if (path.isAbsolute(template)) return null;
+		const joinedTemplate = path.join(tmpdirBase, template);
+		return isTempPath(joinedTemplate, cwd, shellVars)
+			? path.join(TEMP_DIR, `.pi-mktemp-${name.toLowerCase()}`)
+			: null;
+	}
+
+	if (template && !isTempPath(template, cwd, shellVars)) return null;
+	return path.join(TEMP_DIR, `.pi-mktemp-${name.toLowerCase()}`);
 }
 
 function isTempPath(rawPath: string, cwd: string, shellVars: ReadonlyMap<string, string> = new Map(), visited: Set<string> = new Set()): boolean {
@@ -751,7 +863,6 @@ function isTempPath(rawPath: string, cwd: string, shellVars: ReadonlyMap<string,
 		// Glob pattern - resolve against cwd and check each target individually.
 		// Empty glob (no matches) is allowed — no files to mutate.
 		try {
-			// @ts-expect-error — GlobOptions types omit `dot` (Node 22 fast-glob compat) but runtime supports it
 			const matches = globSync(normalized, { cwd, dot: true });
 			if (matches.length === 0) return true;
 			return matches.every((m) => isTempPath(m, cwd));
