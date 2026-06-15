@@ -1,7 +1,7 @@
 # Story: Model Groups spawn router
 
 Plan: 🟢 PLAN APPROVED
-Status: ✅ DONE
+Status: 🔵 IN PR
 
 ## Purpose
 

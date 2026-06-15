@@ -6,9 +6,24 @@
 - Claimed by: focused child agent (openspec-story-claim)
 - Scope: Implementation of approved `model-groups-spawn-router` story only; no product code changed during claim.
 - Main-tree targets: pi-agenticoding
-- Status: ✅ DONE
+- Status: 🔵 IN PR
+
+## PR State
+
+- PR URL: https://github.com/agenticoding/pi-agenticoding/pull/14
+- Number: 14
+- Title: Model Groups spawn router
+- Branch: model-groups-spawn-router
+- Opened at: 2026-06-15T16:20:14Z
+- PR status: open
+- Review decision: 
+- Merge commit: —
+- Merged at: —
+- Last synced: 2026-06-15T16:20:22Z
 
 ## Progress Timeline
+
+- 2026-06-15T16:20:22Z Reopened remote review from local `✅ DONE`; moved step to `🔵 IN PR` — https://github.com/agenticoding/pi-agenticoding/pull/14
 
 - 2026-06-15T15:53:00Z **Post-review autocomplete UX enhancement**: `#group` autocomplete suggestions now show compact configured model/thinking details while still inserting only `#group-name` prompt text.
   - Changed: `pi-agenticoding/model-groups/{autocomplete.ts,router.ts}`, `pi-agenticoding/tests/unit/model-groups-autocomplete.test.ts`, `pi-agenticoding/CHANGELOG.md`, and story/design/tasks wording.
@@ -45,7 +60,7 @@
 
 ## Session Handoff
 
-- **Status**: 🟢 PLAN APPROVED; implementation ✅ DONE.
-- **Remaining**: none; optional manual Pi smoke if desired.
+- **Status**: 🟢 PLAN APPROVED; implementation 🔵 IN PR.
+- **Remaining**: wait for GitHub PR review/merge; optional manual Pi smoke if desired.
 - **Blockers**: none known.
-- **Next Steps**: Story complete locally; no `/openspec-story-resume` action required.
+- **Next Steps**: Rerun `/openspec-story-pr model-tag-router model-groups-spawn-router https://github.com/agenticoding/pi-agenticoding/pull/14` to resync PR state, or `/openspec-story-resume` if PR feedback requests changes.

@@ -8,14 +8,14 @@ Phase 1 of the model-groups feature is complete: **solid CRUD only**. Model reso
 
 **Done:** The operator can open `/model-groups` from any Pi session, create/edit/rename/delete model groups and their model entries, switch group scope between project and global, and see boot-time validation health (unavailable model refs, project overrides, degraded states).
 
-**Done:** The spawn tool can optionally accept a Model Group name, resolve it to a concrete authenticated model + thinking level, and keep default spawn behavior unchanged when no group is requested.
+**In PR:** The spawn tool can optionally accept a Model Group name, resolve it to a concrete authenticated model + thinking level, and keep default spawn behavior unchanged when no group is requested.
 
 ## Scope
 
 Three planned stories:
 
 1. **Model Groups CRUD** (done) — Data layer (schema, persistence, validation) + TUI management panel (list, editor, model edit, add-model wizard, delete confirm). Boot validation on `session_start`. No spawn/routing integration. Change: `openspec/changes/model-groups-data-layer-tui/`.
-2. **Model Groups spawn router** (done) — Add optional `group` parameter to the spawn tool, resolve a named group to one concrete authenticated model + clamped thinking level, inject names-only group guidance for natural-language/#group use, and render default/routed/fallback spawn identity. Change: `openspec/changes/model-groups-spawn-router/`.
+2. **Model Groups spawn router** (in PR) — Add optional `group` parameter to the spawn tool, resolve a named group to one concrete authenticated model + clamped thinking level, inject names-only group guidance for natural-language/#group use, and render default/routed/fallback spawn identity. Change: `openspec/changes/model-groups-spawn-router/`.
 3. **Meta-model proxy** (future) — Register groups as logical Pi models in the model picker (follow-up epic with known pain points).
 
 ## Constraints
