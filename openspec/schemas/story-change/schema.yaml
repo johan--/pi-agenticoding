@@ -1,0 +1,27 @@
+# Story change schema
+# Defines required artifact structure for openspec story changes.
+story:
+  required_sections:
+    - Purpose
+    - Actors
+    - Scope
+    - Out of Scope
+    - Scenarios / Behavior Examples
+    - Acceptance
+    - Verification
+    - Critical Files
+    - Implementation Notes
+    - Locked Decisions
+    - Discovery Notes
+  verification_subsections:
+    required:
+      - Verification Commands
+      - Test Architecture Plan
+      - Acceptance Proof Matrix
+    conditional:
+      - Surface / Branch Proof Matrix
+      - Design Sources
+      - Design Element Trace
+      - Input Boundary Shape Risk
+      - Fail-open Checks
+      - Risk Lens Inventory
