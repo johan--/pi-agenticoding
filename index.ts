@@ -28,6 +28,7 @@ import { registerNotebookRehydration } from "./notebook/rehydration.js";
 import { registerNotebookTopicTool } from "./notebook/topic-tool.js";
 import { setActiveNotebookTopic } from "./notebook/topic.js";
 import { registerHandoffTool } from "./handoff/tool.js";
+import { getReadonlyFromBranch } from "./readonly-rehydration.js";
 import { registerHandoffCommand } from "./handoff/command.js";
 import { registerHandoffCompaction } from "./handoff/compact.js";
 import { registerSpawnTool } from "./spawn/index.js";
@@ -112,30 +113,7 @@ export default function (pi: ExtensionAPI): void {
 	function rehydrateReadonlyState(ctx: ExtensionContext): void {
 		const wasEnabled = state.readonlyEnabled;
 		const branch = ctx.sessionManager?.getBranch?.() ?? [];
-		state.readonlyEnabled = false;
-		for (let i = branch.length - 1; i >= 0; i--) {
-			const entry = branch[i] as unknown;
-			if (!entry || typeof entry !== "object") continue;
-			const e = entry as Record<string, unknown>;
-			if (e.type !== "custom" || e.customType !== "agenticoding-readonly") continue;
-			const d = e.data as Record<string, unknown> | undefined;
-			state.readonlyEnabled = d?.enabled === true;
-			break;
-		}
-		// CLI flag sets initial default, but branch state takes precedence after any toggle.
-		if (pi.getFlag("readonly") === true) {
-			const hasBranchEntry = branch.some(
-				(e) => {
-					const entry = e as unknown;
-					return entry !== null && typeof entry === "object" &&
-						(entry as Record<string, unknown>).type === "custom" &&
-						(entry as Record<string, unknown>).customType === "agenticoding-readonly";
-				}
-			);
-			if (!hasBranchEntry) {
-				state.readonlyEnabled = true;
-			}
-		}
+		state.readonlyEnabled = getReadonlyFromBranch(branch, pi);
 		// Nudge on any rehydrated readonly authority change.
 		if (state.readonlyEnabled !== wasEnabled) {
 			state.readonlyNudgePending = true;
