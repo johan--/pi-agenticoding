@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { registerReadonlyPI, makeReadonlyUICtx } from "./helpers.js";
@@ -159,4 +160,25 @@ test("blocks dd of= outside temp and allows it in temp", async () => {
 
 	await assertBlocked(toolCall, `dd if=/dev/zero of=${outside} bs=1 count=1`);
 	await assertAllowed(toolCall, `dd if=/dev/zero of=${tmp}/dd-test bs=1 count=1`);
+});
+
+test("allows hidden-file globs inside temp dir", async () => {
+	const { pi, toolCall } = registerReadonlyPI();
+	await enableReadonly(pi);
+	const cwd = await mkdtemp(path.join(os.tmpdir(), "readonly-hidden-allow-"));
+
+	try {
+		await writeFile(path.join(cwd, ".secret"), "ok");
+		await assertAllowed(toolCall, "rm -f *", cwd);
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("blocks hidden-file globs outside temp dir", async () => {
+	const { pi, toolCall } = registerReadonlyPI();
+	await enableReadonly(pi);
+	// Home dir already has hidden files (.gitconfig, .ssh, etc.) and is
+	// outside TEMP_DIR — no filesystem writes needed for the glob to match.
+	await assertBlocked(toolCall, "rm -f *", os.homedir());
 });

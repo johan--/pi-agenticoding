@@ -834,6 +834,32 @@ function getSafeMktempSyntheticPath(rawValue: string, cwd: string, shellVars: Re
 	return path.join(TEMP_DIR, `.pi-mktemp-${name.toLowerCase()}`);
 }
 
+/**
+ * Expand a glob pattern to include hidden-file (dotfile) variants.
+ *
+ * WORKAROUND: `node:fs.globSync` ignores the `dot: true` option on
+ * Node.js v24+ — it silently skips dotfiles. This function explicitly
+ * generates `.*` variants for each wildcard segment so hidden files
+ * are matched.
+ */
+function expandHiddenGlobPatterns(pattern: string): string[] {
+	const segments = pattern.split("/");
+	const options = segments.map((segment) => {
+		if (segment === "**") return [segment, "**/.*", "**/.*/**"];
+		// Literal or already-dotfile segments need no expansion.
+		// Brace patterns ({a,b}) get a redundant .{a,b} variant — harmless.
+		if (!/[*?{}\[\]]/.test(segment) || segment.startsWith(".")) return [segment];
+		return [segment, `.${segment}`];
+	});
+	const patterns = new Set<string>();
+	const visit = (index: number, built: string[]) => {
+		if (index === options.length) return void patterns.add(built.join("/"));
+		for (const option of options[index]) visit(index + 1, [...built, option]);
+	};
+	visit(0, []);
+	return [...patterns];
+}
+
 function isTempPath(rawPath: string, cwd: string, shellVars: ReadonlyMap<string, string> = new Map(), visited: Set<string> = new Set()): boolean {
 	const normalized = stripMatchingQuotes(rawPath);
 	if (!normalized || normalized === "/dev/null" || /^&\d+$/.test(normalized)) return true;
@@ -861,9 +887,10 @@ function isTempPath(rawPath: string, cwd: string, shellVars: ReadonlyMap<string,
 
 	if (/[*?{}\[\]]/.test(normalized)) {
 		// Glob pattern - resolve against cwd and check each target individually.
+		// Expand hidden variants explicitly because node:fs globSync skips dotfiles.
 		// Empty glob (no matches) is allowed — no files to mutate.
 		try {
-			const matches = globSync(normalized, { cwd, dot: true });
+			const matches = globSync(expandHiddenGlobPatterns(normalized), { cwd });
 			if (matches.length === 0) return true;
 			return matches.every((m) => isTempPath(m, cwd));
 		} catch {
