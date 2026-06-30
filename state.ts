@@ -6,6 +6,7 @@
  */
 
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
+import type { ReadonlyCacheEntry, ReadonlyCacheIssue } from "./readonly-cache.js";
 
 export interface AgenticodingState {
 	/** Compact notebook pages keyed by kebab-case name */
@@ -74,6 +75,30 @@ export interface AgenticodingState {
 	/** One-shot flag: deliver a readonly ON or OFF nudge via context hook, then clear. */
 	readonlyNudgePending: boolean;
 
+	/** Session-owned readonly frontmatter cache for loaded skills. */
+	readonlySkillCache: Map<string, ReadonlyCacheEntry>;
+
+	/** Session-owned readonly frontmatter cache for resolved prompt commands. */
+	readonlyPromptCache: Map<string, ReadonlyCacheEntry>;
+
+	/** Frontmatter issues keyed by skill name. */
+	readonlySkillIssues: Map<string, ReadonlyCacheIssue>;
+
+	/** Frontmatter issues keyed by prompt command name. */
+	readonlyPromptIssues: Map<string, ReadonlyCacheIssue>;
+
+	/**
+	 * FIFO slash-command intents extracted from queued user inputs, deferred to
+	 * before_agent_start where the readonly frontmatter cache is populated.
+	 * Empty = no pending toggle.
+	 *
+	 * `type` preserves `/skill:name` vs generic `/name` so lookup can target the
+	 * correct readonly source without conflating skills and prompt templates.
+	 * Enqueued in `input`, drained in `before_agent_start` until the first real
+	 * readonly decision, cleared on session reset.
+	 */
+	pendingReadonlyCommands: Array<{ type: "skill" | "command"; name: string }>;
+
 	/**
 	 * Last context-percentage band at which the watchdog nudge was delivered.
 	 * null = never delivered. Bands: null (<30), 0 (30-49), 1 (50-69), 2 (70+).
@@ -87,6 +112,10 @@ export interface AgenticodingState {
 export function createState(): AgenticodingState {
 	const childSessions = new Map<string, AgentSession>();
 	const liveChildSessions = new Map<string, AgentSession>();
+	const readonlySkillCache = new Map<string, ReadonlyCacheEntry>();
+	const readonlyPromptCache = new Map<string, ReadonlyCacheEntry>();
+	const readonlySkillIssues = new Map<string, ReadonlyCacheIssue>();
+	const readonlyPromptIssues = new Map<string, ReadonlyCacheIssue>();
 	const state: AgenticodingState = {
 		notebookPages: new Map(),
 		epoch: 0,
@@ -101,6 +130,11 @@ export function createState(): AgenticodingState {
 		childSessionEpoch: 0,
 		readonlyEnabled: false,
 		readonlyNudgePending: false,
+		readonlySkillCache,
+		readonlyPromptCache,
+		readonlySkillIssues,
+		readonlyPromptIssues,
+		pendingReadonlyCommands: [],
 		lastWatchdogBand: null,
 	};
 	// Prevent replacement — spawn lifecycle code and renderer ownership checks
@@ -134,6 +168,11 @@ export function resetState(state: AgenticodingState): void {
 	state.pendingRequestedHandoff = null;
 	state.readonlyEnabled = false;
 	state.readonlyNudgePending = false;
+	state.readonlySkillCache.clear();
+	state.readonlyPromptCache.clear();
+	state.readonlySkillIssues.clear();
+	state.readonlyPromptIssues.clear();
+	state.pendingReadonlyCommands.length = 0;
 	state.lastWatchdogBand = null;
 	abortAndClearChildSessions(state);
 }

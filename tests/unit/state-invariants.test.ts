@@ -109,6 +109,14 @@ function assertResetClears(state: AgenticodingState): void {
 	assert.equal(state.pendingHandoff, null, "pendingHandoff must be null after reset");
 	assert.equal(state.pendingRequestedHandoff, null, "pendingRequestedHandoff must be null after reset");
 	assert.equal(state.pendingTopicBoundaryHint, null, "pendingTopicBoundaryHint must be null after reset");
+	assert.equal(state.readonlyEnabled, false, "readonlyEnabled must be false after reset");
+	assert.equal(state.readonlyNudgePending, false, "readonlyNudgePending must be false after reset");
+	assert.equal(state.readonlySkillCache.size, 0, "readonlySkillCache must be empty after reset");
+	assert.equal(state.readonlyPromptCache.size, 0, "readonlyPromptCache must be empty after reset");
+	assert.equal(state.readonlySkillIssues.size, 0, "readonlySkillIssues must be empty after reset");
+	assert.equal(state.readonlyPromptIssues.size, 0, "readonlyPromptIssues must be empty after reset");
+	assert.equal(state.pendingReadonlyCommands.length, 0, "pendingReadonlyCommands must be empty after reset");
+	assert.equal(state.lastWatchdogBand, null, "lastWatchdogBand must be null after reset");
 }
 
 // ── Properties ────────────────────────────────────────────────────────
@@ -257,6 +265,13 @@ test("Property 4: Reset clears all state fields", async () => {
 					const s2 = createState();
 					setActiveNotebookTopic(s2, "test-topic", "agent");
 					await saveNotebookPage(mockPi, s2, "my-page", "some content");
+					s2.readonlyEnabled = true;
+					s2.readonlyNudgePending = true;
+					s2.readonlySkillCache.set("skill-a", { readonly: true, mtimeMs: 1, filePath: "/tmp/skill-a.md" });
+					s2.readonlyPromptCache.set("prompt-a", { readonly: false, mtimeMs: 1, filePath: "/tmp/prompt-a.md" });
+					s2.readonlySkillIssues.set("skill-b", { kind: "invalid-readonly-value", filePath: "/tmp/skill-b.md" });
+					s2.readonlyPromptIssues.set("prompt-b", { kind: "unreadable-file", filePath: "/tmp/prompt-b.md" });
+					s2.pendingReadonlyCommands.push({ type: "skill", name: "skill-a" });
 					resetState(s2);
 					assertResetClears(s2);
 				},
