@@ -65,6 +65,19 @@ test("non-readonly spawn child prompt keeps normal authority", async () => {
 	assert.doesNotMatch(prompt, /\[readonly\] write\/edit blocked; bash writes\/deletions outside temp blocked\./i);
 });
 
+test("readonly spawn child bash tool rejects malformed commands", async () => {
+	await spawnWithCapture(true, async (config) => {
+		const bashTool = config.customTools.find((tool: any) => tool.name === "bash");
+		assert.ok(bashTool, "readonly child should receive a bash tool");
+		for (const command of [undefined, null, 42, { command: "ls" }]) {
+			await assert.rejects(
+				() => bashTool.execute("malformed", { command }),
+				/bash command input must be a string/,
+			);
+		}
+	});
+});
+
 test("readonly spawn child bash tool blocks non-temp writes and allows temp writes", async () => {
 	const outsideTemp = path.join(os.homedir(), `readonly-child-test-${process.pid}-${Date.now()}`);
 	const insideTemp = path.join(os.tmpdir(), `readonly-child-test-${Date.now()}`);

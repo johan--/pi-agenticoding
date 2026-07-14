@@ -5,6 +5,7 @@ import { canUseOsSandbox, wrapCommandWithOsSandbox } from "./os-sandbox.js";
 import {
 	buildReadonlyBashBlockReason,
 	buildReadonlyPackageManagerBlockReason,
+	READONLY_INVALID_BASH_COMMAND_REASON,
 } from "./readonly-copy.js";
 import { resolveRealPath } from "./resolve-path.js";
 import { TEMP_DIR } from "./temp-dir.js";
@@ -1088,7 +1089,14 @@ export type ReadonlyBashGuardResult =
  * @param cwd - Working directory for path resolution
  * @returns Structured result: allow, block (with reason), or sandbox (with wrapped command)
  */
-export function applyReadonlyBashGuard(cmd: string, cwd: string): ReadonlyBashGuardResult {
+export function applyReadonlyBashGuard(cmd: unknown, cwd: string): ReadonlyBashGuardResult {
+	if (typeof cmd !== "string") {
+		return {
+			action: "block",
+			reason: buildReadonlyBashBlockReason(READONLY_INVALID_BASH_COMMAND_REASON, "<invalid input>"),
+		};
+	}
+
 	// L1: OS sandbox (primary enforcement when available)
 	if (canUseOsSandbox()) {
 		const verdict = classifyBashCommand(cmd, cwd);
