@@ -147,7 +147,7 @@ test("shared readonly fragments keep copy aligned across contexts", () => {
 	assert.match(buildReadonlyRequestedHandoffContinuation(), /fresh context resumes in readonly mode/i);
 	assert.match(buildReadonlyHandoffWaitNotice(), /readonly remains active/i);
 	assert.match(buildReadonlyHandoffCommandNotice(), /next context resumes readonly mode/i);
-	assert.match(buildReadonlyTopicBoundaryNotification("oauth", "billing"), /only when the ~30K-token handoff guard is eligible/i);
+	assert.match(buildReadonlyTopicBoundaryNotification("oauth", "billing"), /handoff exception activates.*once the context is ready/i);
 	assert.match(buildReadonlyDisabledContextSuffix(42), /42%/);
 	assert.match(READONLY_NON_TEMP_MUTATION_SCOPE, /non-temp bash filesystem mutations/i);
 	assert.match(READONLY_HANDOFF_TRIGGER, /human topic boundary/i);

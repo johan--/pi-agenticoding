@@ -185,8 +185,8 @@ test("default watchdog guidance respects token eligibility", async () => {
 		{ getContextUsage: () => ({ percent: 30, contextWindow: 64_000 }) },
 	);
 	const nudge = result.messages.at(-1).content;
-	assert.match(nudge, /continue inline or use spawn/i);
-	assert.doesNotMatch(nudge, /prefer .*handoff/i);
+	assert.match(nudge, /continue working until handoff is available/i);
+	assert.doesNotMatch(nudge, /prefer a deliberate handoff/i);
 });
 
 test("buildNudge does not require an ineligible pending handoff by default", () => {
@@ -196,7 +196,7 @@ test("buildNudge does not require an ineligible pending handoff by default", () 
 		readonlyEnabled: false,
 		pendingRequestedHandoff: { toolCalled: false, resumeReadonlyAfterHandoff: false, enforcementAttempts: 0 },
 	}, null, false);
-	assert.match(nudge, /not yet eligible/i);
+	assert.match(nudge, /not yet ready for compaction/i);
 	assert.doesNotMatch(nudge, /complete a real handoff in this session now/i);
 });
 

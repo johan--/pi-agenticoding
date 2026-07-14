@@ -82,7 +82,7 @@ export const READONLY_PENDING_HANDOFF_READONLY_OFF_NOTIFICATION =
 
 /** Notification in /handoff command when readonly is active. */
 export const READONLY_HANDOFF_EXCEPTION_NOTIFICATION =
-	`Readonly is active. An ${READONLY_EXPLICIT_HANDOFF} exception is reserved for this request; compaction starts once the ~30K-token handoff guard is eligible. Write/edit remain blocked, and ${READONLY_BASH_SCOPE} stays in effect. After a successful handoff, ${READONLY_NEXT_CONTEXT_RESUMES.toLowerCase()}`;
+	`Readonly is active. An ${READONLY_EXPLICIT_HANDOFF} exception is reserved for this request; the handoff will start a fresh context once feasible. Write/edit remain blocked, and ${READONLY_BASH_SCOPE} stays in effect. After a successful handoff, ${READONLY_NEXT_CONTEXT_RESUMES.toLowerCase()}`;
 
 /** Add context usage to the one-shot readonly-disabled message. */
 export function buildReadonlyDisabledContextSuffix(percent: number): string {
@@ -91,7 +91,7 @@ export function buildReadonlyDisabledContextSuffix(percent: number): string {
 
 /** Explain that an eligible human topic boundary will activate the temporary bypass. */
 export function buildReadonlyTopicBoundaryNotification(from: string | null, to: string): string {
-	return `Active notebook topic changed: ${from ?? "(unset)"} → ${to}. This is a likely task boundary; use spawn only for same-topic delegation. In readonly mode, the next context hook enables the handoff exception only when the ~30K-token handoff guard is eligible; otherwise this remains advisory.`;
+	return `Active notebook topic changed: ${from ?? "(unset)"} → ${to}. This is a likely task boundary; use spawn only for same-topic delegation. In readonly mode, the handoff exception activates only once the context is ready; until then this boundary is advisory.`;
 }
 
 /** Explain when a readonly topic boundary has activated the handoff path. */

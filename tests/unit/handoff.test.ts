@@ -408,7 +408,7 @@ test("failed compaction releases the overlap guard without mutating state twice"
 		compact: (options: any) => { secondCallbacks = options; },
 	});
 	secondCallbacks.onComplete();
-	assert.deepEqual((pi.sentUserMessages as any[]).map((message: any) => message.content), ["Handoff failed — first failure. No required handoff remains pending; retry when ready. Continue working in the current context.", "Proceed."]);
+	assert.deepEqual((pi.sentUserMessages as any[]).map((message: any) => message.content), ["Handoff failed — first failure. No required handoff remains pending; retry when ready.", "Proceed."]);
 });
 
 test("reset invalidates late handoff callbacks", async () => {
@@ -508,18 +508,14 @@ test("turn_end fallback keeps requested handoff status sticky until real handoff
 	assert.equal(statuses.get(STATUS_KEY_HANDOFF), "🤝 Handoff requested — waiting for eligible context");
 });
 
-test("handoff tool metadata explains the 30K minimum threshold", () => {
+test("handoff tool metadata describes when to use and the call-handoff rule", () => {
 	const pi = createTestPI();
 	const state = createState();
 	registerHandoffTool(pi as any, state);
 
 	const tool = pi.tools.get("handoff");
-	assert.match(tool.description, /30K tokens/i);
-	assert.match(tool.description, /cannot be estimated/i);
-	assert.match(tool.description, /approximate/i);
-	assert.match(tool.promptGuidelines!.join(" "), /~30K-token minimum/i);
-	assert.match(tool.promptGuidelines!.join(" "), /cannot be estimated/i);
-	assert.match(tool.promptGuidelines!.join(" "), /mid-teens percentage/i);
+	assert.match(tool.description, /past ~30%/i);
+	assert.match(tool.description, /call handoff/i);
 });
 
 test("buildEnrichedTask includes execution constraints when resumeReadonlyAfterHandoff is true", () => {
@@ -575,7 +571,7 @@ test("handoff tool rejects small session with clear error", async () => {
 		),
 		(error: unknown) =>
 			error instanceof Error &&
-			error.message.includes("too small for handoff") &&
+			error.message.includes("handoff unavailable yet") &&
 			error.message.includes("~3% (5000 tokens)") &&
 			error.message.includes("Continue working"),
 	);
@@ -661,7 +657,7 @@ test("handoff tool rejects small session with null percent without crashing", as
 		),
 		(error: unknown) =>
 			error instanceof Error &&
-			error.message.includes("too small for handoff") &&
+			error.message.includes("handoff unavailable yet") &&
 			error.message.includes("(5000 tokens)") &&
 			error.message.includes("Continue working"),
 	);
@@ -684,7 +680,7 @@ test("handoff tool rejects small session estimated from percent when tokens are 
 		),
 		(error: unknown) =>
 			error instanceof Error &&
-			error.message.includes("too small for handoff") &&
+			error.message.includes("handoff unavailable yet") &&
 			error.message.includes("~20000 tokens estimated from context usage") &&
 			error.message.includes("Continue working"),
 	);
@@ -747,7 +743,7 @@ test("handoff tool rejects session just below the 30000-token minimum", async ()
 		),
 		(error: unknown) =>
 			error instanceof Error &&
-			error.message.includes("too small for handoff") &&
+			error.message.includes("handoff unavailable yet") &&
 			error.message.includes("29999 tokens") &&
 			error.message.includes("Continue working"),
 	);

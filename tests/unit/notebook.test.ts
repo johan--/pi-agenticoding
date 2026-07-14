@@ -367,9 +367,8 @@ test("readonly /notebook boundary notification explains deferred handoff eligibi
 	await pi.commands.get("notebook")!.handler("oauth", ctx as any);
 	await pi.commands.get("notebook")!.handler("billing", ctx as any);
 
-	assert.match(notifications.at(-1)?.message ?? "", /handoff exception/i);
-	assert.match(notifications.at(-1)?.message ?? "", /~30K-token handoff guard is eligible/i);
-	assert.match(notifications.at(-1)?.message ?? "", /otherwise this remains advisory/i);
+	assert.match(notifications.at(-1)?.message ?? "", /handoff exception activates.*once the context is ready/i);
+	assert.match(notifications.at(-1)?.message ?? "", /until then this boundary is advisory/i);
 	assert.doesNotMatch(notifications.at(-1)?.message ?? "", /ask the user for an explicit \/handoff/i);
 });
 

@@ -306,9 +306,9 @@ test("handoff summary follows readonly toggles after tool execution", async () =
 
 test("readonly topic boundary derives eligibility from percentage when tokens are unavailable", async () => {
 	assert.equal(await handoffAllowedAtUsage({ tokens: null, percent: 15, contextWindow: 200000 }), true,
-		"15% of a 200K context is exactly the 30K minimum");
+		"15% of a 200K context meets the minimum token threshold");
 	assert.equal(await handoffAllowedAtUsage({ tokens: null, percent: 14.999, contextWindow: 200000 }), false,
-		"just below the 30K minimum must remain blocked");
+		"just below the minimum token threshold must remain blocked");
 });
 
 test("readonly topic boundary creates the same bypass contract as explicit /handoff", async () => {
@@ -430,7 +430,7 @@ test("readonly topic boundary stays advisory until handoff is eligible", async (
 		"ineligible boundary must not unblock handoff");
 });
 
-test("readonly human topic boundary promotes exactly at the 30K threshold without repeated advisory nudges", async () => {
+test("readonly human topic boundary promotes exactly at the token threshold without repeated advisory nudges", async () => {
 	const { pi, toolCall } = createHandoffPI();
 	await pi.commands.get("readonly").handler("", makeReadonlyUICtx() as any);
 	const [contextHandler] = pi.handlers.get("context")!;

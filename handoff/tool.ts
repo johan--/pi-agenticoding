@@ -41,7 +41,7 @@ function validateHandoffTask(task: string, ctx: ExtensionContext): void {
 	const approximateTokens = estimateHandoffContextTokens(usage);
 	if (approximateTokens === null) {
 		throw new Error(
-			"Context usage unavailable. Handoff requires an estimated session size of at least 30K tokens before compaction can work, so this handoff is rejected until context usage can be measured. Continue working in the current context.",
+			"Context usage unavailable; handoff rejected. Continue working and retry.",
 		);
 	}
 	if (approximateTokens < MIN_HANDOFF_TOKENS) {
@@ -49,7 +49,7 @@ function validateHandoffTask(task: string, ctx: ExtensionContext): void {
 		const percent = normalizeContextPercent(usage?.percent);
 		const pctLabel = percent === null ? "?" : `~${Math.round(percent)}%`;
 		throw new Error(
-			`Context at ${pctLabel} (${tokenLabel}). Session is too small for handoff — this extension requires at least 30K tokens before compaction can work. Continue working in the current context.`,
+			`Context at ${pctLabel} (${tokenLabel}); handoff unavailable yet. Continue working and retry.`,
 		);
 	}
 }
@@ -84,7 +84,7 @@ function sendHandoffFailure(pi: ExtensionAPI, error: Error, pendingRequest: Agen
 	const nextStep = pendingRequest
 		? "The required handoff remains pending; retry when context usage is eligible. "
 		: "No required handoff remains pending; retry when ready. ";
-	pi.sendUserMessage(`Handoff failed — ${error.message}. ${nextStep}Continue working in the current context.`);
+	pi.sendUserMessage(`Handoff failed — ${error.message}. ${nextStep.trim()}`);
 }
 
 function failHandoff(
@@ -144,15 +144,12 @@ export function registerHandoffTool(
 			"Replace the active context with a compact task brief at the end of " +
 			"the current turn while keeping full history in the session file. Handoff clears the active notebook topic so the next clean context can assign a fresh one.\n\n" +
 			"WHEN TO USE:\n" +
-			"  1. Context is eligible (measurable and at least 30K tokens) and the current job is no longer cleanly " +
+			"  1. Context past ~30% and the current job is no longer cleanly " +
 			"represented near the front of attention.\n" +
 			"  2. Context is filled with mechanics irrelevant to what comes " +
 			"next (research traces, planning deliberation, dead ends).\n" +
-			"  3. The current job is complete and a new distinct task starts.\n" +
-			"  4. This extension's handoff guard requires at least 30K tokens before compaction can work, and rejects handoff when that size cannot be estimated. " +
-			"That is roughly the mid-teens percent range in common context windows, " +
-			"so treat any percentage wording here as approximate.\n\n" +
-			"Rule: one context, one job. When the job changes, call handoff only when eligible; otherwise continue inline or use spawn.\n\n" +
+			"  3. The current job is complete and a new distinct task starts.\n\n" +
+			"Rule: one context, one job. When the job changes, call handoff.\n\n" +
 			"AFTER HANDOFF the LLM sees:\n" +
 			"  • System prompt + context primer\n" +
 			"  • The handoff task — the distilled next work at the top of context\n" +
@@ -162,9 +159,6 @@ export function registerHandoffTool(
 		promptGuidelines: [
 			"Before handoff, promote any missing durable grounding knowledge that the next context will need to the notebook. " +
 				"Then draft a concise but sufficiently detailed brief with the distilled next task and immediate starting state for the next clean context. The active notebook topic will reset after handoff, so the next context should assign a fresh topic from the brief or user direction.",
-			"Do not call handoff when the session is below this extension's ~30K-token minimum threshold or when context usage cannot be estimated yet. " +
-				"In common context windows that is only an approximate mid-teens percentage, so prefer the token rule when known. " +
-				"Use spawn for subtasks or continue inline until the context grows.",
 		],
 
 		executionMode: "sequential",

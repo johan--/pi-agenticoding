@@ -29,7 +29,7 @@ function buildRequestedHandoffNudge(state: NudgeState, eligible: boolean): strin
 		const readonlyWait = state.pendingRequestedHandoff?.resumeReadonlyAfterHandoff
 			? buildReadonlyHandoffWaitNotice()
 			: "";
-		return "A handoff is requested, but context usage is not yet eligible for compaction. Continue inline or use spawn; retry handoff once usage is measurable and at least 30K tokens." + readonlyWait;
+		return "A handoff is requested, but context is not yet ready for compaction. Continue working and retry handoff later." + readonlyWait;
 	}
 	const requestedHandoff = state.pendingRequestedHandoff!;
 	const readonlyContinuation = requestedHandoff.resumeReadonlyAfterHandoff
@@ -45,7 +45,7 @@ function buildBoundaryNudge(state: NudgeState, eligible: boolean): string {
 	const boundary = state.pendingTopicBoundaryHint!;
 	const action = eligible
 		? "Prefer a deliberate handoff before continuing under the new topic: save durable findings to the notebook, draft a concise situational brief, and call handoff."
-		: "Continue inline or use spawn until context usage is measurable and at least 30K tokens; handoff remains advisory for now.";
+		: "Continue working until context is ready for handoff; this boundary remains advisory for now.";
 	return `Notebook topic changed from ${boundary.from ?? "(unset)"} to ${boundary.to}.
 Treat this as a strong task-boundary signal. ${action}
 Only continue inline if this was merely a rename rather than a real pivot.`;
@@ -62,7 +62,7 @@ function buildDefaultNudge(pct: number | null, topic: string | null, eligible: b
 				: `Context at ${pct}% — choose your next step by topic fit.`;
 	const pivotAdvice = eligible
 		? "prefer a deliberate handoff"
-		: "continue inline or use spawn until context usage is measurable and at least 30K tokens";
+		: "continue working until handoff is available";
 
 	if (topic) {
 		const urgency = pct !== null && pct >= 70
@@ -77,7 +77,7 @@ Save durable findings to the notebook before handoff.`;
 	const noTopicUrgency = pct !== null && pct >= 70
 		? eligible
 			? "Assign a fresh topic in the next clean context after handoff."
-			: "Assign a fresh topic now; continue inline or use spawn until context usage is eligible for handoff."
+			: "Assign a fresh topic now; continue working until handoff is available."
 		: `Assign a short stable topic soon. If the work stays within that topic, prefer spawn for noisy subtasks. If the work shifts beyond it, ${pivotAdvice}.`;
 	return `${contextLead}
 No active notebook topic is set. ${noTopicUrgency}`;

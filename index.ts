@@ -469,7 +469,7 @@ export default function (pi: ExtensionAPI): void {
 			parts.push(
 				`\n## Active Notebook Topic\n` +
 				`Current topic: \`${state.activeNotebookTopic}\` (${state.activeNotebookTopicSource ?? "unknown"}-set).\n` +
-				`Treat this as the current semantic frame. If new work fits it, prefer spawn for isolated noisy subtasks. If it does not fit it, prefer handoff when eligible; otherwise continue inline or use spawn.`,
+				`Treat this as the current semantic frame. If new work fits it, prefer spawn for isolated noisy subtasks. If it does not fit it, prefer handoff.`,
 			);
 		} else {
 			parts.push(
