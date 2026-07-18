@@ -18,6 +18,9 @@ async function runRealChildInvocation(params: { prompt: string; thinking?: "max"
 	const modelId = "agentic-e2e-model";
 	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
 	const previousOpenAiApiKey = process.env.OPENAI_API_KEY;
+	const previousPiOffline = process.env.PI_OFFLINE;
+	const previousFetch = globalThis.fetch;
+	const outboundFetches: string[] = [];
 
 	try {
 		await mkdir(extensionDir, { recursive: true });
@@ -73,6 +76,11 @@ export default function(pi) {
 
 		process.env.PI_CODING_AGENT_DIR = agentDir;
 		process.env.OPENAI_API_KEY = "test-openai-key";
+		process.env.PI_OFFLINE = "1";
+		globalThis.fetch = (async (input: Parameters<typeof fetch>[0]) => {
+			outboundFetches.push(input instanceof Request ? input.url : String(input));
+			throw new Error(`offline fixture blocked outbound fetch: ${outboundFetches.at(-1)}`);
+		}) as typeof fetch;
 		(globalThis as any).__agenticE2eProbeCalls = 0;
 		(globalThis as any).__agenticE2eStreamCalls = 0;
 		const model = {
@@ -99,12 +107,16 @@ export default function(pi) {
 			modelId,
 			probeCalls: (globalThis as any).__agenticE2eProbeCalls,
 			streamCalls: (globalThis as any).__agenticE2eStreamCalls,
+			outboundFetches,
 		};
 	} finally {
 		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
 		if (previousOpenAiApiKey === undefined) delete process.env.OPENAI_API_KEY;
 		else process.env.OPENAI_API_KEY = previousOpenAiApiKey;
+		if (previousPiOffline === undefined) delete process.env.PI_OFFLINE;
+		else process.env.PI_OFFLINE = previousPiOffline;
+		globalThis.fetch = previousFetch;
 		delete (globalThis as any).__agenticE2eProbeCalls;
 		delete (globalThis as any).__agenticE2eStreamCalls;
 		await rm(tempRoot, { recursive: true, force: true });
@@ -117,6 +129,7 @@ test("exact Pi floor real child completes through inherited/default thinking", a
 	assert.equal(proof.result.details.model, proof.modelId);
 	assert.equal(proof.probeCalls, 1);
 	assert.equal(proof.streamCalls, 2);
+	assert.deepEqual(proof.outboundFetches, [], "offline real-child fixture attempted an outbound fetch");
 });
 
 test("exact Pi floor real child preserves selected identity and max thinking", async () => {
@@ -129,6 +142,7 @@ test("exact Pi floor real child preserves selected identity and max thinking", a
 	assert.equal(proof.result.details.thinking, "max");
 	assert.equal(proof.probeCalls, 1);
 	assert.equal(proof.streamCalls, 2);
+	assert.deepEqual(proof.outboundFetches, [], "offline real-child fixture attempted an outbound fetch");
 });
 
 test("spawn source uses only the public selected-model child session boundary", async () => {
