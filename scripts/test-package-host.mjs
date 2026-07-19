@@ -1,19 +1,13 @@
-import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { repoRootFromScript, runChecked, runNpm } from "./compat-process.mjs";
 
-function run(cwd, command, args, capture = false) {
-  const result = spawnSync(command, args, { cwd, encoding: "utf8", stdio: capture ? "pipe" : "inherit" });
-  if (result.status !== 0) throw new Error(result.stderr || result.stdout || `${command} failed`);
-  return result.stdout;
-}
-
-const root = new URL("..", import.meta.url).pathname;
+const root = repoRootFromScript(import.meta.url);
 const temp = mkdtempSync(join(tmpdir(), "pi-agenticoding-host-"));
 let tarball;
 try {
-  const packJson = JSON.parse(run(root, "npm", ["pack", "--json", "--ignore-scripts"], true));
+  const packJson = JSON.parse(runNpm(root, ["pack", "--json", "--ignore-scripts"], { capture: true }).stdout);
   tarball = join(root, packJson[0].filename);
   const host = join(temp, "host");
   mkdirSync(host, { recursive: true });
@@ -29,9 +23,9 @@ try {
       "pi-agenticoding": `file:${tarball}`,
     },
   }, null, 2)}\n`);
-  run(host, "npm", ["install", "--ignore-scripts"]);
-  const graph = JSON.parse(run(host, "npm", ["ls", "--json", "pi-agenticoding",
-    "@earendil-works/pi-ai", "@earendil-works/pi-coding-agent", "@earendil-works/pi-tui", "typebox"], true));
+  runNpm(host, ["install", "--ignore-scripts"]);
+  const graph = JSON.parse(runNpm(host, ["ls", "--json", "pi-agenticoding",
+    "@earendil-works/pi-ai", "@earendil-works/pi-coding-agent", "@earendil-works/pi-tui", "typebox"], { capture: true }).stdout);
   const extension = graph.dependencies?.["pi-agenticoding"];
   if (!extension) throw new Error("Packed extension is missing from host graph");
   for (const name of ["@earendil-works/pi-ai", "@earendil-works/pi-coding-agent", "@earendil-works/pi-tui", "typebox"]) {
@@ -53,7 +47,7 @@ const loaded = loader.getExtensions();
 if (loaded.errors.length > 0) throw new Error(JSON.stringify(loaded.errors));
 if (loaded.extensions.length !== 1) throw new Error("packed extension did not load");
 `);
-  run(host, process.execPath, ["smoke.mjs"]);
+  runChecked(process.execPath, ["smoke.mjs"], { cwd: host });
   process.stdout.write("Packed Pi 0.80.8 host smoke passed with host-provided peers.\n");
 } finally {
   if (tarball) rmSync(tarball, { force: true });
